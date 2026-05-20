@@ -1,7 +1,7 @@
 {
   "name": "suno-toolkits",
   "description": "Automate Suno AI music generation — batch-submit prompts.json files via Claude in Chrome, and download lossless WAV plus complete metadata sidecar JSON from any workspace.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": {
     "name": "Gary Hsieh / uLove Music"
   },
