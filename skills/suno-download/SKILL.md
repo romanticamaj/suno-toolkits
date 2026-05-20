@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download all WAV files plus complete metadata sidecar JSON from a Suno workspace. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Triggers Suno's convert_wav flow, polls until ready, downloads lossless WAV from CDN in parallel, and writes a full-metadata sidecar JSON next to each file.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Suno Download
@@ -92,13 +92,24 @@ Run JS block **`CONVERT_AND_POLL`** with **all** selected clip IDs at once — n
 
 ### Step 7 — Fetch + write sidecar JSON
 
-Run JS block **`FETCH_SIDECARS`** in **chunks of 8 clip IDs** (8 × ~5KB ≈ 40KB — stays under the tool output limit). It returns plain pretty-printed JSON strings.
+Run JS block **`FETCH_SIDECARS`** in **chunks of 8 clip IDs** (8 × ~5KB ≈ 40KB — under the tool output limit). Each call returns `[{id, title, batch_index, sidecar_json}]` with plain pretty-printed JSON strings.
 
-> ⚠️ **Never** ask the JS to base64-encode, gzip, or "compress" the sidecars, and never spin up a localhost server to ferry them. The Claude-in-Chrome output filter blocks base64/binary-looking payloads — that path is a dead end and wastes 15+ minutes. Plain JSON text in small chunks passes fine and is fast.
+> ⚠️ Never base64/gzip the result, and never spin up a localhost server to ferry it. The Claude-in-Chrome output filter blocks base64/binary payloads — that path is a dead end that wastes 15+ minutes. Plain JSON text in small chunks is the only correct way.
 
-For each returned `{id, title, batch_index, sidecar_json}`: **Write** `{final filename}.json` (same base name as the WAV) with the `sidecar_json` string **verbatim** — it is already valid pretty-printed JSON.
+**Do not write the 32 files one-by-one** — 32 `Write` calls is the slow path. **Bundle, then split:**
 
-If a chunk's return looks truncated, halve the chunk size and retry just that chunk.
+1. Collect every chunk's results into one array. For each clip compute its final filename — `{workspace} - {title}_{variant}.json`, the **same base name as its WAV** (variant + sanitise + MAX_PATH rule from Step 6).
+2. **Write ONE bundle file** `_sidecars_bundle.json` into the output dir: a JSON array of `{ "file": "<final .json filename>", "json": <the sidecar_json string> }`. That is a single `Write` call (~170KB — fine).
+3. **Bash** — run the **`SPLIT_SIDECARS`** node command below: it reads the bundle, writes each `file` with its `json` content, then deletes the bundle. One Bash call → 32 sidecar files.
+
+If a chunk's return looks truncated, halve the chunk size and retry that chunk.
+
+```
+# SPLIT_SIDECARS — replace {OUTDIR} with the output directory
+node -e "const fs=require('fs'),p=require('path'),d=process.argv[1],b=JSON.parse(fs.readFileSync(p.join(d,'_sidecars_bundle.json'),'utf8'));b.forEach(e=>fs.writeFileSync(p.join(d,e.file),e.json));fs.unlinkSync(p.join(d,'_sidecars_bundle.json'));console.log('wrote '+b.length+' sidecars')" "{OUTDIR}"
+```
+
+(Node ships with Suno-pipe workflows and is assumed available. If `node` is missing, fall back to writing each `.json` individually.)
 
 ### Step 8 — Report
 
