@@ -1,7 +1,7 @@
 ---
 name: suno-download
-description: Download all WAV files plus complete metadata sidecar JSON from a Suno workspace. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Triggers Suno's convert_wav flow, polls until ready, downloads lossless WAV from CDN, and writes a full-metadata sidecar JSON next to each file.
-version: 1.0.0
+description: Download all WAV files plus complete metadata sidecar JSON from a Suno workspace. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Triggers Suno's convert_wav flow, polls until ready, downloads lossless WAV from CDN in parallel, and writes a full-metadata sidecar JSON next to each file.
+version: 1.1.0
 ---
 
 # Suno Download
@@ -24,9 +24,12 @@ GET  /api/gen/{clipId}/wav_file/       → 404 = not ready; 200 = {wav_file_url}
 GET  {wav_file_url}                    → public CDN, no auth, the WAV bytes
 ```
 
-**Split of work** (important — WAV files are 10-50MB each, too large for context):
-- **Browser JS** (`javascript_tool`) — runs all *authenticated* API calls (list, convert, poll). Returns only small JSON (URLs + metadata).
-- **Bash `curl`** — downloads the actual WAV bytes from the public CDN URL straight to disk.
+**Split of work** (important — WAV files are 10-50MB each, far too large for context, and the Claude-in-Chrome tool channel is security-filtered + size-limited):
+- **Browser JS** (`javascript_tool`) — runs the *authenticated* API calls only (list, convert, poll, fetch metadata). Returns small plain-text JSON.
+- **Bash `curl`** — downloads the WAV bytes from the public CDN **in parallel**, straight to disk. Bulk binary never touches the tool channel.
+- **Sidecar JSON** comes out of the browser as **plain JSON text in small chunks** — never base64/gzip (the output filter blocks those).
+
+**Speed rule:** minimise model↔browser round-trips. Fire conversions in parallel, poll in parallel, download WAVs in parallel. Never sequential-with-sleeps.
 
 ## Prerequisites
 
@@ -63,31 +66,41 @@ Run JS block **`LIST_CLIPS`** with the `project_id`. It paginates `/api/project/
 
 Show a table: `# | title | duration | variant`. Group the 2 variants of each prompt (`batch_index` 0 → `_a`, 1 → `_b`). Unless the user said "all", ask which to download.
 
-### Step 5 — Convert + fetch WAV URLs (browser JS)
+### Step 5 — Convert + get WAV URLs (browser JS)
 
-Run JS block **`CONVERT_AND_POLL`** with the selected clip IDs (**≤10 per call** — chunk larger sets). It triggers `convert_wav` for all (spaced 300ms), then polls every clip's `wav_file/` until ready (or 120s timeout per call). Returns one object per clip:
+Run JS block **`CONVERT_AND_POLL`** with **all** selected clip IDs at once — no chunk limit, the return is tiny (`{id, wav_url}` pairs only). It fires every `convert_wav` in parallel, then polls all `wav_file/` endpoints in parallel rounds until ready (3-minute ceiling).
 
-```
-{ id, title, batch_index, wav_url, mp3_url, sidecar_json }
-```
+- **First run** waits for Suno's server-side conversion (can be a few minutes for a fresh workspace). **Reruns are instant** — already converted.
+- Returns `[{ id, wav_url }]`. If any `wav_url` is `null`, re-run with just those IDs.
 
-`sidecar_json` is an already-`JSON.stringify`'d **string** (write it verbatim — see the block's note on why it isn't a nested object).
+### Step 6 — Download WAVs in parallel (Bash)
 
-If `wav_url` is `null` for some clips (timed out), re-run `CONVERT_AND_POLL` with just those IDs — conversion is already done server-side, so the retry resolves instantly.
+**Do not download sequentially with sleeps** — that is the #1 cause of slow runs. Download concurrently:
 
-### Step 6 — Download WAVs + write sidecar JSON
-
-For each returned clip:
-1. Build the filename: `{workspace} - {title}_{variant}` (variant `a`/`b` from `batch_index`; if `batch_index` is null, sort the two same-title clips by `created_at` then `id`).
+1. Compute each clip's final filename: `{workspace} - {title}_{variant}`
+   - `title` / `batch_index` come from the Step 3 clip list. Variant: `batch_index` 0→`a`, 1→`b`; if null, sort the two same-title clips by `created_at` then `id`.
    - Sanitize: replace `/ \ : * ? " < > |` with `_`.
-   - **Watch path length** — `{workspace}` and `{title}` are both long and often share a prefix; the full path can approach the Windows 260-char `MAX_PATH` limit. If the path would exceed ~240 chars, drop the `{workspace} - ` prefix (the sidecar JSON still records the workspace) and tell the user.
-2. **Bash**: `curl -s -L -o "{outdir}/{filename}.wav" "{wav_url}"`
-   - Verify: file exists, size > 100KB, first 4 bytes are `RIFF`.
-3. **Write** the sidecar `{outdir}/{filename}.json` — write the `sidecar_json` string from Step 5 **verbatim** (it is already valid pretty-printed JSON; do not re-serialize or hand-rebuild it from the tool's displayed output).
+   - **MAX_PATH guard**: `{workspace}` and `{title}` are long and often share a prefix. If the full path would exceed ~240 chars (Windows limit 260), drop the `{workspace} - ` prefix (the sidecar JSON still records the workspace) and tell the user.
+2. Write `_wav_urls.txt` into the output dir — one `wav_url` per line.
+3. **Parallel download**, 8-way. `curl -O` saves each file under its URL basename (`{clipId}.wav` — UUID, no spaces, safe):
+   ```bash
+   cd "{outdir}" && xargs -P 8 -n 1 curl -sL -O < _wav_urls.txt
+   ```
+4. **Rename** each `{clipId}.wav` → its final `{workspace} - {title}_{variant}.wav`.
+5. **Verify** each final file: exists, size > 100KB, first 4 bytes are `RIFF`.
+6. Delete `_wav_urls.txt`.
 
-Batch the curl calls but keep ~300ms spacing to be polite to the CDN.
+### Step 7 — Fetch + write sidecar JSON
 
-### Step 7 — Report
+Run JS block **`FETCH_SIDECARS`** in **chunks of 8 clip IDs** (8 × ~5KB ≈ 40KB — stays under the tool output limit). It returns plain pretty-printed JSON strings.
+
+> ⚠️ **Never** ask the JS to base64-encode, gzip, or "compress" the sidecars, and never spin up a localhost server to ferry them. The Claude-in-Chrome output filter blocks base64/binary-looking payloads — that path is a dead end and wastes 15+ minutes. Plain JSON text in small chunks passes fine and is fast.
+
+For each returned `{id, title, batch_index, sidecar_json}`: **Write** `{final filename}.json` (same base name as the WAV) with the `sidecar_json` string **verbatim** — it is already valid pretty-printed JSON.
+
+If a chunk's return looks truncated, halve the chunk size and retry just that chunk.
+
+### Step 8 — Report
 
 ```
 ## Suno Download 完成
@@ -180,9 +193,7 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
 
 ### `CONVERT_AND_POLL`  — replace `CLIP_IDS_JSON` with a JS array literal e.g. `["id1","id2"]`
 
-> **Process at most ~10 IDs per call.** Each result carries a ~2KB pre-stringified `sidecar_json`; larger batches risk the tool's output limit. For >10 clips, call this block in chunks.
->
-> `sidecar_json` is returned as an **already-`JSON.stringify`'d string**, NOT a nested object. This is deliberate: `javascript_tool` truncates deeply-nested return objects (`[TRUNCATED: Max depth exceeded]`), which would corrupt a sidecar written from the displayed value. A string is rendered whole — write it to the `.json` file verbatim.
+> Pass **all** selected clip IDs in one call. Conversions fire in parallel, polling runs in parallel rounds. The return is just `{id, wav_url}` pairs (tiny — no size concern).
 
 ```js
 (async () => {
@@ -193,44 +204,49 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
   const API = 'https://studio-api-prod.suno.com';
   const ids = CLIP_IDS_JSON;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  // trigger conversions (spaced)
-  for (const id of ids) {
-    await fetch(`${API}/api/gen/${id}/convert_wav/`, { method: 'POST', headers: H }).catch(() => {});
-    await sleep(300);
-  }
-  // poll
+  // fire ALL conversions in parallel
+  await Promise.allSettled(ids.map(id =>
+    fetch(`${API}/api/gen/${id}/convert_wav/`, { method: 'POST', headers: H })));
+  // poll ALL pending in parallel rounds
   const wav = {};
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + 180000;
   while (Object.keys(wav).length < ids.length && Date.now() < deadline) {
-    for (const id of ids) {
-      if (wav[id]) continue;
+    const pending = ids.filter(id => !wav[id]);
+    const res = await Promise.allSettled(pending.map(async id => {
       const r = await fetch(`${API}/api/gen/${id}/wav_file/`, { headers: H });
-      if (r.ok) { const d = await r.json(); if (d.wav_file_url) wav[id] = d.wav_file_url; }
-      await sleep(150);
-    }
-    if (Object.keys(wav).length < ids.length) await sleep(2000);
+      if (r.ok) { const d = await r.json(); if (d.wav_file_url) return [id, d.wav_file_url]; }
+      return null;
+    }));
+    for (const x of res) if (x.status === 'fulfilled' && x.value) wav[x.value[0]] = x.value[1];
+    if (Object.keys(wav).length < ids.length) await sleep(3000);
   }
-  // fetch full metadata for sidecar
-  const meta = {};
-  for (let i = 0; i < ids.length; i += 20) {
-    const batch = ids.slice(i, i + 20);
-    const r = await fetch(`${API}/api/feed/?ids=${batch.join(',')}`, { headers: H });
-    if (r.ok) {
-      const j = await r.json();
-      const arr = Array.isArray(j) ? j : (j.clips || []);
-      arr.forEach(c => { meta[c.id] = c; });
-    }
-    await sleep(300);
-  }
+  return ids.map(id => ({ id, wav_url: wav[id] || null }));
+})()
+```
+
+### `FETCH_SIDECARS`  — replace `CLIP_IDS_JSON` with a **chunk of ≤8** clip IDs
+
+> Call once per chunk of 8. Returns plain pretty-printed JSON strings — depth-1 array of flat objects, so no truncation from the depth limiter; ~40KB/chunk stays under the output size limit. Do NOT base64-encode or compress the result.
+
+```js
+(async () => {
+  const token = await window.Clerk.session.getToken();
+  const H = { accept: '*/*', authorization: `Bearer ${token}`,
+    'browser-token': JSON.stringify({ token: btoa(JSON.stringify({ timestamp: Date.now() })) }),
+    'device-id': '00000000-0000-4000-8000-000000000001', origin: 'https://suno.com', referer: 'https://suno.com/' };
+  const API = 'https://studio-api-prod.suno.com';
+  const ids = CLIP_IDS_JSON;
+  const r = await fetch(`${API}/api/feed/?ids=${ids.join(',')}`, { headers: H });
+  const j = r.ok ? await r.json() : [];
+  const arr = Array.isArray(j) ? j : (j.clips || []);
+  const meta = {}; arr.forEach(c => { meta[c.id] = c; });
   return ids.map(id => {
     const c = meta[id] || {};
     return {
       id,
       title: c.title || null,
       batch_index: c.metadata?.batch_index ?? c.batch_index ?? null,
-      wav_url: wav[id] || null,
-      mp3_url: c.audio_url || null,
-      sidecar_json: JSON.stringify(c, null, 2),  // pre-stringified — write to .json verbatim
+      sidecar_json: JSON.stringify(c, null, 2),  // plain JSON string — write to .json verbatim
     };
   });
 })()
