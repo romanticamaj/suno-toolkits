@@ -25,8 +25,10 @@ Two skills:
 
 ## Requirements
 
-- Chrome connected via **Claude in Chrome** (the `claude-in-chrome` MCP), logged in to suno.com
-- A Suno **paid plan** (WAV export and v5/v5.5 models require it)
+- **Chrome with the Claude extension installed** — the "Claude in Chrome" browser extension.
+- **Claude Code launched with `--chrome`**: `claude --chrome`. This flag connects Claude Code to the Chrome extension; without it the skills cannot drive the browser at all.
+- Logged in to **suno.com** in that Chrome, on a **paid plan** (WAV export and v5/v5.5 models require it).
+- No Suno tab needs to be open beforehand — the skills navigate to suno.com themselves.
 
 ## How it works
 
@@ -63,14 +65,17 @@ See each skill's `SKILL.md` for the full endpoint reference and JS blocks.
 
 ## Local testing
 
-This is a plugin folder. To load it during development:
+This is a plugin folder. To load it during development, start Claude Code with **both** flags —
+`--chrome` (so the skills can drive the browser) and `--plugin-dir` (so the plugin loads):
 
 ```bash
-claude --plugin-dir D:\ulovemusic\suno-toolkits
+claude --chrome --plugin-dir D:\ulovemusic\suno-toolkits
 ```
 
 Skills are then available as `/suno-toolkits:suno-submit` and `/suno-toolkits:suno-download`.
 After editing a `SKILL.md`, run `/reload-plugins` — no restart needed.
+
+> Omit `--chrome` and the skills load but can't operate Chrome. Omit `--plugin-dir` and the skills aren't loaded at all. Local testing needs both.
 
 ## Status
 

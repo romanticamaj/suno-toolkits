@@ -23,7 +23,10 @@ After Suno finishes generating (minutes later), use **`/suno-download`** to fetc
 
 ## Prerequisites
 
-- Chrome connected via Claude in Chrome, logged in to suno.com (paid plan for v5/v5.5)
+- **Claude Code must be started with the `--chrome` flag** (`claude --chrome`). Without it the Claude in Chrome browser tools are not available and this skill cannot run. If the `mcp__claude-in-chrome__*` tools can't be loaded, tell the user to relaunch with `claude --chrome`.
+- **Chrome must have the Claude extension installed** (the "Claude in Chrome" extension) — that is what `--chrome` connects to.
+- Logged in to **suno.com** in that Chrome, on a paid plan (v5/v5.5 models need it).
+- A Suno tab does **not** need to be open beforehand — Step 2 navigates a tab to suno.com itself.
 - Generates real songs and **consumes credits** — confirm with the user before the loop if the batch is large.
 
 ## Inputs
@@ -62,8 +65,8 @@ Per prompt: `id`, `name`, `name_zh`, `style`, `lyrics` (string or null), `negati
 
 ### Step 2 — Browser setup
 
-1. `ToolSearch`: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__find,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__form_input,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__browser_batch`
-2. `tabs_context_mcp` → get the tab. `navigate` it to `https://suno.com/create`.
+1. `ToolSearch`: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__find,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__form_input,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__browser_batch`. If these tools cannot be loaded, Claude Code was not started with `--chrome` — stop and tell the user to relaunch with `claude --chrome`.
+2. `tabs_context_mcp` → get (or create) a tab. **Always `navigate` it to `https://suno.com/create`** — do not assume a Suno tab is already open (it usually is not).
 
 ### Step 3 — Set the workspace
 

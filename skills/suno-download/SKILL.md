@@ -30,8 +30,10 @@ GET  {wav_file_url}                    → public CDN, no auth, the WAV bytes
 
 ## Prerequisites
 
-- Chrome connected via Claude in Chrome, logged in to suno.com (Pro/Premier — WAV needs paid plan)
-- A Suno tab open on `https://suno.com` (needed so `window.Clerk` exists for the auth token)
+- **Claude Code must be started with the `--chrome` flag** (`claude --chrome`). Without it the Claude in Chrome browser tools are not available and this skill cannot run. If the `mcp__claude-in-chrome__*` tools can't be loaded, tell the user to relaunch with `claude --chrome`.
+- **Chrome must have the Claude extension installed** (the "Claude in Chrome" extension) — that is what `--chrome` connects to.
+- Logged in to **suno.com** in that Chrome, on a paid plan (WAV export needs Pro/Premier).
+- A Suno tab does **not** need to be open beforehand — Step 1 navigates a tab to suno.com itself.
 
 ## Inputs
 
@@ -45,8 +47,8 @@ GET  {wav_file_url}                    → public CDN, no auth, the WAV bytes
 
 ### Step 1 — Set up the browser tab
 
-1. Load Claude in Chrome tools via `ToolSearch`: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__javascript_tool`
-2. Call `tabs_context_mcp` to get a tab. If no Suno tab, `navigate` one to `https://suno.com/create`.
+1. Load Claude in Chrome tools via `ToolSearch`: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__javascript_tool`. If these tools cannot be loaded, Claude Code was not started with `--chrome` — stop and tell the user to relaunch with `claude --chrome`.
+2. Call `tabs_context_mcp` to get (or create) a tab. **Always `navigate` that tab to `https://suno.com/create`** — do not assume a Suno tab is already open (it usually is not). The tab must be on a `suno.com` origin or `window.Clerk` (the auth token source) won't exist.
 3. All `javascript_tool` calls below run in that tab.
 
 ### Step 2 — Resolve the workspace
