@@ -29,7 +29,7 @@ GET  {wav_file_url}                    → public CDN, no auth, the WAV bytes
 - **Bash `curl`** — downloads the WAV bytes from the public CDN **in parallel**, straight to disk. Bulk binary never touches the tool channel.
 - **Sidecar JSON** comes out of the browser as **plain JSON text in small chunks** — never base64/gzip (the output filter blocks those).
 
-**Speed rule:** minimise model↔browser round-trips. Fire conversions in parallel, poll in parallel, download WAVs in parallel. Never sequential-with-sleeps.
+**Speed rule:** minimise model↔browser round-trips, but **cap API concurrency**. `convert_wav` and polling run through a concurrency pool — **≤5 `studio-api` requests in flight** — with **429 exponential backoff**. Never one-at-a-time-with-sleeps (too slow); never all-32-at-once (trips Suno's rate limiter). WAV downloads hit the `cdn1.suno.ai` **CDN**, not the API — 8-way parallel there is fine.
 
 ## Prerequisites
 
@@ -68,7 +68,7 @@ Show a table: `# | title | duration | variant`. Group the 2 variants of each pro
 
 ### Step 5 — Convert + get WAV URLs (browser JS)
 
-Run JS block **`CONVERT_AND_POLL`** with **all** selected clip IDs at once — no chunk limit, the return is tiny (`{id, wav_url}` pairs only). It fires every `convert_wav` in parallel, then polls all `wav_file/` endpoints in parallel rounds until ready (3-minute ceiling).
+Run JS block **`CONVERT_AND_POLL`** with **all** selected clip IDs at once — no chunk limit, the return is tiny (`{id, wav_url}` pairs only). Internally it caps at **5 concurrent `studio-api` requests** and retries `429`s with exponential backoff, so it is fast without tripping Suno's rate limiter. It fires the conversions, then polls `wav_file/` every 5s until all ready (4-minute ceiling).
 
 - **First run** waits for Suno's server-side conversion (can be a few minutes for a fresh workspace). **Reruns are instant** — already converted.
 - Returns `[{ id, wav_url }]`. If any `wav_url` is `null`, re-run with just those IDs.
@@ -191,9 +191,11 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
 })()
 ```
 
+> **Shared rate-limit helpers** — both `CONVERT_AND_POLL` and `FETCH_SIDECARS` below open with the same two helpers: `api()` (a `fetch` wrapper that retries `429` with exponential backoff 2s→30s) and `pool()` (runs an async fn over a list with a hard concurrency cap). They are what keep the skill off Suno's rate limiter. Do not strip them out or replace them with bare `Promise.all` over all IDs.
+
 ### `CONVERT_AND_POLL`  — replace `CLIP_IDS_JSON` with a JS array literal e.g. `["id1","id2"]`
 
-> Pass **all** selected clip IDs in one call. Conversions fire in parallel, polling runs in parallel rounds. The return is just `{id, wav_url}` pairs (tiny — no size concern).
+> Pass **all** selected clip IDs in one call. Conversions and polling each run at **≤5 concurrent** requests with 429 backoff. Return is just `{id, wav_url}` pairs (tiny).
 
 ```js
 (async () => {
@@ -204,21 +206,35 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
   const API = 'https://studio-api-prod.suno.com';
   const ids = CLIP_IDS_JSON;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  // fire ALL conversions in parallel
-  await Promise.allSettled(ids.map(id =>
-    fetch(`${API}/api/gen/${id}/convert_wav/`, { method: 'POST', headers: H })));
-  // poll ALL pending in parallel rounds
+  // 429-aware fetch: exponential backoff on rate-limit
+  async function api(url, opts) {
+    for (let i = 0; i < 6; i++) {
+      const r = await fetch(url, opts).catch(() => null);
+      if (r && r.status === 429) { await sleep(Math.min(2000 * 2 ** i, 30000)); continue; }
+      return r;
+    }
+    return null;
+  }
+  // concurrency-limited map — never more than `limit` requests in flight
+  async function pool(items, limit, fn) {
+    const out = []; let i = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+    }));
+    return out;
+  }
+  // fire conversions, ≤5 concurrent
+  await pool(ids, 5, id => api(`${API}/api/gen/${id}/convert_wav/`, { method: 'POST', headers: H }));
+  // poll, ≤5 concurrent, every 5s
   const wav = {};
-  const deadline = Date.now() + 180000;
+  const deadline = Date.now() + 240000;
   while (Object.keys(wav).length < ids.length && Date.now() < deadline) {
     const pending = ids.filter(id => !wav[id]);
-    const res = await Promise.allSettled(pending.map(async id => {
-      const r = await fetch(`${API}/api/gen/${id}/wav_file/`, { headers: H });
-      if (r.ok) { const d = await r.json(); if (d.wav_file_url) return [id, d.wav_file_url]; }
-      return null;
-    }));
-    for (const x of res) if (x.status === 'fulfilled' && x.value) wav[x.value[0]] = x.value[1];
-    if (Object.keys(wav).length < ids.length) await sleep(3000);
+    await pool(pending, 5, async id => {
+      const r = await api(`${API}/api/gen/${id}/wav_file/`, { headers: H });
+      if (r && r.ok) { const d = await r.json(); if (d.wav_file_url) wav[id] = d.wav_file_url; }
+    });
+    if (Object.keys(wav).length < ids.length) await sleep(5000);
   }
   return ids.map(id => ({ id, wav_url: wav[id] || null }));
 })()
@@ -236,8 +252,17 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
     'device-id': '00000000-0000-4000-8000-000000000001', origin: 'https://suno.com', referer: 'https://suno.com/' };
   const API = 'https://studio-api-prod.suno.com';
   const ids = CLIP_IDS_JSON;
-  const r = await fetch(`${API}/api/feed/?ids=${ids.join(',')}`, { headers: H });
-  const j = r.ok ? await r.json() : [];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  async function api(url, opts) {
+    for (let i = 0; i < 6; i++) {
+      const r = await fetch(url, opts).catch(() => null);
+      if (r && r.status === 429) { await sleep(Math.min(2000 * 2 ** i, 30000)); continue; }
+      return r;
+    }
+    return null;
+  }
+  const r = await api(`${API}/api/feed/?ids=${ids.join(',')}`, { headers: H });
+  const j = (r && r.ok) ? await r.json() : [];
   const arr = Array.isArray(j) ? j : (j.clips || []);
   const meta = {}; arr.forEach(c => { meta[c.id] = c; });
   return ids.map(id => {
@@ -263,4 +288,5 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
 - **Both API hosts work**: `studio-api-prod.suno.com` (dash) and `studio-api.prod.suno.com` (dot) are aliases.
 - **Sidecar JSON** is the full clip object — `tags` (style), `negative_tags` (excludes), `prompt` (lyrics), `make_instrumental`, `model_name`, `duration`, `media_urls`, `project`, timestamps.
 - **`metadata.control_sliders`** (`style_weight`, `weirdness_constraint`, 0-1 floats) is **only present when the user adjusted those sliders** away from 50%. A clip generated with default sliders has **no `control_sliders` key at all** — that is normal, not an error. Treat its absence as "defaults (0.5 / 0.5)".
+- **Rate limiting**: Suno's `studio-api` throttles aggressive clients (the exporter extensions ship 300ms spacing + exponential backoff for exactly this). `CONVERT_AND_POLL` and `FETCH_SIDECARS` already cap at **5 concurrent** requests and retry `429`s with backoff (2s→30s). If you still see repeated `429`s, lower the `pool` limit from `5` to `3`. WAV downloads from `cdn1.suno.ai` are **CDN** traffic — a separate system, not subject to the API limit, so `xargs -P 8` is safe there.
 - This skill is **read-only on Suno** (convert_wav only triggers a render of an existing clip — no new generations, no extra credits beyond the WAV entitlement).
