@@ -13,7 +13,7 @@ A Claude Code plugin that automates [Suno AI](https://suno.com) — batch-submit
 
 ```
 /plugin marketplace add romanticamaj/suno-toolkits
-/plugin install suno-toolkits@ulove-music
+/plugin install suno-toolkits@romanticamaj
 ```
 
 ## Requirements
