@@ -1,0 +1,17 @@
+{
+  "name": "ulove-music",
+  "owner": {
+    "name": "Gary Hsieh / uLove Music"
+  },
+  "plugins": [
+    {
+      "name": "suno-toolkits",
+      "source": "./",
+      "description": "Automate Suno AI — batch-submit prompts and download lossless WAV + full metadata, via Claude in Chrome.",
+      "homepage": "https://github.com/romanticamaj/suno-toolkits",
+      "repository": "https://github.com/romanticamaj/suno-toolkits",
+      "license": "MIT",
+      "keywords": ["suno", "music", "ai", "claude-in-chrome", "wav", "prompt"]
+    }
+  ]
+}
