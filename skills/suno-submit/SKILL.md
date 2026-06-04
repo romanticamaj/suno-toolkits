@@ -1,7 +1,7 @@
 ---
 name: suno-submit
-description: Batch-submit prompts.json files to Suno via Claude in Chrome. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence), and clicks Create with paced timing. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
-version: 1.0.0
+description: Batch-submit prompts.json files to Suno via Claude in Chrome. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence, vocal gender), optionally attaches a workspace clip as an audio reference (Cover/Inspiration) with a set Audio Influence applied to every prompt, and clicks Create with paced timing. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
+version: 1.1.0
 ---
 
 # Suno Submit
@@ -40,10 +40,12 @@ After Suno finishes generating (minutes later), use **`/suno-download`** to fetc
 ## prompts.json schema (read these fields)
 
 Top level: `project`, `short_name`, `creator`, `date`, `prompts[]`.
-Per prompt: `id`, `name`, `name_zh`, `style`, `lyrics` (string or null), `negative_tags`, `instrumental` (bool), `model` (shorthand or null), `weirdness` (0-100 or null), `style_influence` (0-100 or null).
+Per prompt: `id`, `name`, `name_zh`, `style`, `lyrics` (string or null), `negative_tags`, `instrumental` (bool), `model` (shorthand or null), `weirdness` (0-100 or null), `style_influence` (0-100 or null), `vocal_gender` (`"male"`/`"female"`/null), `audio_reference` (string or null), `audio_mode` (`"cover"`/`"inspiration"`/null), `audio_influence` (0-100 or null).
 
 - **null = use Suno default** (model → v5.5; weirdness/style_influence → 50; honor whatever is filled).
 - **Title** for each song: `{short_name}_{name}`. If the prompts.json sits in a `BGM_NN_*` folder, use `{short_name}_BGM{NN}_{name}` so titles stay traceable. An explicit per-prompt `title` field, if present, overrides this.
+- **Audio reference (Cover/Inspiration)**: these may be set **top-level** (apply to every prompt — the common case: "套 audio reference = 全部都套") OR per-prompt. `audio_reference` = the **title of an existing clip in the same workspace** to condition on (e.g. an uploaded acapella/reference). `audio_mode` = `cover` (default) or `inspiration`. `audio_influence` = 0-100 (null → Suno default). If `audio_reference` is set, do **Step 4.5** once before the loop. If only some prompts set it, attach/detach per prompt (slower) — prefer one shared reference for the batch.
+- **`vocal_gender`**: sets the Advanced "Vocal Gender" Male/Female toggle. null → leave unset (Suno decides from style/lyrics).
 
 ---
 
@@ -86,8 +88,20 @@ Per prompt: `id`, `name`, `name_zh`, `style`, `lyrics` (string or null), `negati
    - Exclude styles textbox — query "Exclude styles textbox"
    - Song Title textbox — query "Song Title textbox"
    - Create button — query "Create song button"
-   Sliders are addressed by JS (`document.querySelectorAll('[role=slider]')[0]`=Weirdness, `[1]`=Style Influence), not refs.
+   Sliders are addressed by JS via their **`aria-label`** — `document.querySelector('[aria-label="Weirdness"]')`, `[aria-label="Style Influence"]`, and (only when audio is attached) `[aria-label="Audio Influence"]` — not refs and **not positional index**. Label addressing is drift-proof: attaching an audio reference adds a third slider, and addressing by label means the order never matters.
 5. Track slider state in your head: both start at **50**.
+
+### Step 4.5 — Attach audio reference (only if `audio_reference` is set)
+
+Do this **once** before the loop. The audio condition, its Cover/Inspiration mode, and the Audio Influence value all **persist across Create clicks**, so attach + set once, then loop normally. (Verified: settings survive every Create until you change or remove them.)
+
+1. **Attach the clip.** At the top of the Advanced form there is a row of condition tabs: **`+ Audio`** (label "Add audio - Browse, upload, or record audio"), **`+ Voice`**, **`+ Inspo`**. Click **`+ Audio`** → its menu offers **Browse / Upload / Record** — click **"Browse"**. This opens a picker modal titled **"Choose a song to Remix"** with tabs **Staff Picks / For You / Library**. Click the **Library** tab (your own + workspace clips live here). **Search by a distinctive ASCII substring of the clip title, not the full CJK name** — verified: searching the full `一起吃飯吧_trim` returned 0 results, but searching `trim` found it instantly. Click the matching row's **"Remix"** button (the action button is labeled "Remix", not "Select"). (Alternatively the user may have already attached it — if an **Audio** block with a waveform already shows the right clip, skip attaching.)
+   - **"Overwrite Styles?" dialog** — attaching a reference that carries its own style tags pops an Overwrite / Keep Current dialog. Click **Keep Current** to preserve the Styles field. ⚠️ **Even with Keep Current, the attach overwrites the Lyrics field** with the reference clip's structure tags. This is harmless here because Step 5 fills lyrics per prompt *after* Step 4.5 (the first prompt's fill restores correct lyrics) — but **never attach a reference mid-loop without re-asserting lyrics**, and if you only run one prompt, re-fill lyrics after attaching.
+2. **Set the mode.** The attached **Audio** block has a dropdown showing **Cover** or **Inspiration** (aka "Inspo"), plus a trash icon. `find` the toggle (query "Change condition type" button) and set it to match `audio_mode` (default **Cover**). The button's accessibility label reads "Change condition type from Cover" when it is *currently* Cover. **Note:** `audio_mode: inspiration` is set via *this* Audio-block dropdown, NOT via the separate top-row **`+ Inspo`** tab (that tab is a different feature — playlist-based inspiration — don't use it for an `audio_reference`).
+3. **Set Audio Influence.** Once an audio condition is attached, a **third** slider appears in More Options. Address it as **`[aria-label="Audio Influence"]`** (never by positional index). **Its default on a fresh attach is 25** (not 50) — compute the arrow-key delta from 25, or read its current `aria-valuenow` first. Set it to `audio_influence` using the **same JS-focus + arrow-key** method as SET_SLIDERS (focus `document.querySelector('[aria-label="Audio Influence"]')`, then ArrowRight/Left by the delta). **Fallback if arrows don't take:** this slider also responds to a `computer` `left_click_drag` along its track (~1.5 px per 1%); drag, then read `aria-valuenow` and nudge. Always verify `aria-valuenow` afterward. (Verified: maps to `control_sliders.audio_weight` in the API, e.g. 30 → 0.30.)
+4. Verify with JS: `document.querySelector('[aria-label="Audio Influence"]').getAttribute('aria-valuenow')`. Confirm the **Audio** block still shows the right clip and the mode is correct before starting the loop.
+
+> Note: an audio reference can make Suno run long. See "length runaway" in UI notes — keep lyrics' vamp sections (open `La la`/`Oh oh`) short and end with `[End]`.
 
 ### Step 5 — Submit loop
 
@@ -98,9 +112,20 @@ Process the queue in order. For each prompt:
    - Lyrics ← `lyrics` (empty string `""` if null)
    - Exclude styles ← `negative_tags` — **strip a leading `NO `/`no ` from each comma item** (Suno's exclude field wants bare tags; `NO vocals` becomes `vocals`). Empty string if null.
    - Song Title ← computed title
-2. **Set sliders** — see procedure **SET_SLIDERS** below. Skip entirely if target W and SI both equal current state.
-3. **Click Create exactly ONCE.** Then wait. **Never double-click Create** — if it looks like nothing happened, do NOT click again; verify with a screenshot instead. (A double-click submits the prompt twice and wastes credits.)
-4. **Pacing**: wait 5s before the next prompt in the same group; wait 30s when the next prompt is from a different group. (Overridable, but this is the tested-safe default.)
+2. **Set sliders** — see procedure **SET_SLIDERS** below. Skip entirely if target W and SI both equal current state. (Audio Influence, if used, was set once in Step 4.5 and persists — do not reset it per prompt.)
+3. **Set vocal gender** (only if `vocal_gender` is given): click the **Male** / **Female** button in the "Vocal Gender" row of More Options. It's a sticky toggle — once set it persists across prompts, so only click when it needs to change. (Re-confirm it after a regenerate if gender matters.)
+4. **Click Create exactly ONCE.** Then wait. **Never double-click Create** — if it looks like nothing happened, do NOT click again; verify with a screenshot instead. (A double-click submits the prompt twice and wastes credits.)
+5. **Pacing**: wait 5s before the next prompt in the same group; wait 30s when the next prompt is from a different group. (Overridable, but this is the tested-safe default.)
+
+> **Reliable field fill — `form_input` first, JS native-setter as fallback.** `form_input` on the found refs is the default. If it ever lands text in the wrong field, or the Lyrics editor refuses input (it is a React `<textarea>`; synthetic clicks + `ctrl+a` can mis-target and `ctrl+a` may trigger "select all clips" instead), fall back to the React native value setter, which is rock-solid:
+> ```js
+> (() => { const set=(el,v)=>{const p=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+>   Object.getOwnPropertyDescriptor(p,'value').set.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));};
+>   const byPh=s=>[...document.querySelectorAll('textarea,input')].find(e=>(e.placeholder||'').includes(s));
+>   set(byPh('Write some lyrics'), `LYRICS`); set(byPh('afrikaans, big drop'), `STYLE`);
+>   set(byPh('Song Title'), `TITLE`); set(byPh('Exclude styles'), `EXCLUDE`); })()
+> ```
+> Match the textarea/input by placeholder substring (Lyrics → "Write some lyrics", Styles → "afrikaans, big drop", Title → "Song Title", Exclude → "Exclude styles"). Read a value back to confirm. This is the verified-reliable path when driving the form purely by JS.
 
 #### SET_SLIDERS procedure
 
@@ -108,10 +133,12 @@ Suno's sliders are Radix `[role=slider]` DIVs — `form_input` does NOT work on 
 
 1. Target: `W = weirdness ?? 50`, `SI = style_influence ?? 50`.
 2. Weirdness — **two separate tool calls**:
-   (a) `javascript_tool`: `document.querySelectorAll('[role="slider"]')[0].focus();`
+   (a) `javascript_tool`: `document.querySelector('[aria-label="Weirdness"]').focus();`
    (b) `computer` action `key`, text `ArrowRight` (if target > current) or `ArrowLeft`, `repeat` = `|target - current|`.
-3. Style Influence — same two calls: JS focus `[role="slider"][1]`, then arrow-key delta.
-4. Verify with JS: `({w: document.querySelectorAll('[role="slider"]')[0].getAttribute('aria-valuenow'), s: document.querySelectorAll('[role="slider"]')[1].getAttribute('aria-valuenow')})`. If off by 1-2 (occasionally a key is dropped), nudge with single arrow presses.
+3. Style Influence — same two calls: JS focus `document.querySelector('[aria-label="Style Influence"]')`, then arrow-key delta.
+4. Verify with JS: `({w: document.querySelector('[aria-label="Weirdness"]').getAttribute('aria-valuenow'), s: document.querySelector('[aria-label="Style Influence"]').getAttribute('aria-valuenow')})`. If off by 1-2 (occasionally a key is dropped), nudge with single arrow presses.
+
+> Address sliders by `aria-label`, never by positional index — when an audio reference is attached a third slider ("Audio Influence") appears and positional indices would be fragile. Label addressing is order-independent.
 5. Update your tracked current state to the verified values.
 
 > Arrow keys only land on a slider that is focused. If you press arrows without the JS `.focus()` first, they go to whatever else has focus (e.g. the Title field) — always focus immediately before.
@@ -220,4 +247,15 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 - **Sliders**: focus via JS immediately before arrow keys; verify `aria-valuenow`; 1 keypress = 1%.
 - **Model dropdown** currently offers v5.5 / v5 / v4.5+ / v4.5. Set once in Step 4.
 - **Workspace routing** is sticky — set "Save to..." once; every Create goes there until changed.
+- **Audio reference (Cover) is sticky too** — once attached with a mode + Audio Influence, it stays through every Create until you remove it (trash icon) or change it. Attach once in Step 4.5, then loop. The **Audio Influence** slider only exists while an audio condition is attached, and it adds a third `[role=slider]` to the form — so **always address sliders by `aria-label`** (`Weirdness` / `Style Influence` / `Audio Influence`), never by positional index, since attaching audio changes the slider count.
+- **Slider input**: the JS-focus + arrow-key method (SET_SLIDERS) is the primary way for all sliders. If a slider ignores arrow keys, it was not focused — JS `.focus()` it first. As a last resort, `computer` `left_click_drag` along the track works (~1.5 px/1%); always verify `aria-valuenow` after.
+- **Length runaway (8-min tracks)**: a verbose style prompt (~85+ words) and/or an attached audio reference can make Suno generate runaway ~8-minute tracks even from short lyrics. The dominant cause is **open-ended vocalise in the lyrics** (long `[Bridge]` `Oh oh…` / `La la…`, `[Outro]` `Ha ah…`). Fix at the lyrics level: keep vamp sections short and add a final **`[End]`** tag. A concise (~50-65 word) style also helps. This reliably pulls length back toward the reference. (Length can't be verified until render — flag the risk; `/suno-download` shows the final durations.)
+- **Vocal Gender** Male/Female is a sticky toggle in More Options; set once, persists. Useful to lock a gender the style alone doesn't guarantee.
 - Both API hosts (`studio-api-prod.suno.com` dash / `studio-api.prod.suno.com` dot) are aliases.
+
+## Voice (persona) — known limitation, NOT automatable
+
+Suno's **`+ Voice`** ("Voices", Beta) feature — upload/record a voice so generated songs adopt that singer's timbre — **cannot be automated** and should not be attempted as part of a batch:
+- Creating a Voice requires a **live microphone verification**: Suno makes you read a phrase aloud and matches it against the uploaded sample to confirm you are a real, present person and that the voice is **yours**. This is a human, real-time action Claude cannot perform, and it is an anti-impersonation gate that must not be bypassed.
+- The uploaded sample must be **≥10 seconds** of clean singing; prep it with the silence-trim approach (ffmpeg `silencedetect` → cut the longest continuous sung segment) before handing off.
+- Practical guidance: prep the sample, open `+ Voice → Create Voice`, check the consent box, then **hand the mic-verification step to the user**. If the reference voice is someone else's, the gate will (correctly) block it — use style + audio Cover + Vocal Gender instead.
