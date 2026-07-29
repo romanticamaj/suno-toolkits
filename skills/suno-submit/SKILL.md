@@ -238,6 +238,11 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 
 ## UI notes & gotchas
 
+- **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then `computer` click the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.)
+- **Slider race after filling Styles**: the style `input` event re-renders the form and steals focus, so a `.focus()` fired in the same batch may land on a dead node and the arrow keys go nowhere (EP22: W stayed at 35 instead of 25). **Wait ~1s after filling text fields before focusing a slider**, and ALWAYS read back `aria-valuenow` before clicking Create — nudge if off.
+- **Per-Create count verification**: after every Create, read the workspace's "N songs" counter from the page (`[...document.querySelectorAll('*')].filter(e=>/songs$/.test(e.textContent)&&!e.children.length).pop()`) and assert it went **+2**. Catching a missed submit immediately beats reconciling 40 prompts afterwards. Don't scan clip titles from the DOM instead — the list is virtualised, only visible rows exist.
+- **If token-reading JS returns `{}`**: prefix the whole IIFE with `await` (unawaited-promise serialisation regression), and remember JS **side effects still ran** — check UI state before re-running anything that creates/submits, or you'll double-pay. Workspace creation via ENSURE_WORKSPACE has silently succeeded this way (EP22).
+
 - **Refs are session-specific.** `find` the form refs once after Step 4; reuse them through the loop. If a `form_input` errors, re-`find`.
 - **Re-discover after navigation.** Any `navigate` invalidates all refs.
 - **Create exactly once per prompt.** The #1 failure mode is double-clicking Create (→ 4 songs for one prompt, wasted credits). Click once, wait, verify by screenshot — never re-click.

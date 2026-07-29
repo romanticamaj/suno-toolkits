@@ -296,6 +296,9 @@ const API = 'https://studio-api-prod.suno.com';  // dash host; studio-api.prod.s
 
 ## Notes & gotchas
 
+- **If token-reading JS returns `{}`**: it is (almost always) the unawaited-promise regression — prefix the whole IIFE with `await`. If a block can't be re-run safely, stash results in a `window.__x` global inside the token-reading call and read them back with a second token-free sync call; for large payloads (clip lists, wav-url maps, sidecar bundles) trigger a **browser file download** and pick it up from `%USERPROFILE%\Downloads` — the tool channel truncates, downloads don't.
+- **First-run conversion is not instant at scale**: 112 clips took ~2 poll rounds (~3-4 min) before all `wav_file/` URLs appeared. Poll in passes over the remaining ids; never assume one pass is enough.
+
 - **WAV needs a paid plan.** If `convert_wav` returns 401/403, the account lacks WAV access — report it.
 - **`wav_url` is a public CDN link** (`cdn1.suno.ai/{id}.wav`). `curl` it directly; no headers needed.
 - **Re-running is cheap** — once converted, `wav_file/` returns the URL instantly.
