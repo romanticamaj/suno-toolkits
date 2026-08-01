@@ -107,25 +107,30 @@ Do this **once** before the loop. The audio condition, its Cover/Inspiration mod
 
 Process the queue in order. For each prompt:
 
-1. **Fill fields** via `form_input` (one `browser_batch`):
-   - Styles ← `style`
-   - Lyrics ← `lyrics` (empty string `""` if null)
-   - Exclude styles ← `negative_tags` — **strip a leading `NO `/`no ` from each comma item** (Suno's exclude field wants bare tags; `NO vocals` becomes `vocals`). Empty string if null.
-   - Song Title ← computed title
-2. **Set sliders** — see procedure **SET_SLIDERS** below. Skip entirely if target W and SI both equal current state. (Audio Influence, if used, was set once in Step 4.5 and persists — do not reset it per prompt.)
-3. **Set vocal gender** (only if `vocal_gender` is given): click the **Male** / **Female** button in the "Vocal Gender" row of More Options. It's a sticky toggle — once set it persists across prompts, so only click when it needs to change. (Re-confirm it after a regenerate if gender matters.)
-4. **Click Create exactly ONCE.** Then wait. **Never double-click Create** — if it looks like nothing happened, do NOT click again; verify with a screenshot instead. (A double-click submits the prompt twice and wastes credits.)
-5. **Pacing**: wait 5s before the next prompt in the same group; wait 30s when the next prompt is from a different group. (Overridable, but this is the tested-safe default.)
+0. **Put this prompt's lyrics on the system clipboard** (Bash, before touching the browser) — the Lyrics box is a Lexical contenteditable and clipboard paste is the only fill that works. On Windows pipe UTF-16LE into `clip` so CJK survives:
+   ```js
+   execFileSync('clip', { input: Buffer.from(lyrics, 'utf16le') })
+   ```
+1. **Fill Styles / Exclude / Title by JS native setter, then focus the lyrics editor** (one `browser_batch`) — three plain inputs matched by placeholder substring, then a coordinate-free focus:
+   ```js
+   (() => { const set=(el,v)=>{const p=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+     Object.getOwnPropertyDescriptor(p,'value').set.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));};
+     const byPh=s=>[...document.querySelectorAll('textarea,input')].find(e=>(e.placeholder||'').includes(s));
+     set(byPh('emotive delivery'), `STYLE`); set(byPh('Exclude styles'), `EXCLUDE`); set(byPh('Song Title'), `TITLE`);
+     document.querySelector('[aria-label="Lyrics editor"]').focus();
+     return document.activeElement.getAttribute('aria-label'); })()
+   ```
+   The return value must be `"Lyrics editor"`. Placeholders: Styles → the long `emotive delivery, trance influence, …` sample text, Exclude → "Exclude styles", Title → "Song Title".
+   **Exclude styles**: strip a leading `NO `/`no ` from each comma item (Suno's exclude field wants bare tags; `NO vocals` → `vocals`). Empty string if null.
+2. **Paste the lyrics**: `ctrl+a` then `ctrl+v` (real `computer` key events — they land on the focused Lexical editor), then wait ~1s.
+3. **Set sliders** — see **SET_SLIDERS** below. **Skip the calls entirely** if target W and SI both equal current state (`repeat: 0` is an error, not a no-op).
+4. **Set vocal gender** (only if `vocal_gender` is given): click the **Male** / **Female** button in the "Vocal Gender" row of More Options. It's a sticky toggle — once set it persists across prompts, so only click when it needs to change. (Re-confirm it after a regenerate if gender matters.)
+5. **Verify the whole form before Create** — see the mandatory pre-Create verification in *UI notes & gotchas*. This is what catches a clipboard clobber or a paste into the wrong field. **Never click Create on an unverified form.**
+6. **Click Create exactly ONCE.** Then wait. **Never double-click Create** — if it looks like nothing happened, do NOT click again; verify instead. (A double-click submits the prompt twice and wastes credits.)
+7. **Confirm the clip count went +2** via the project API (see *Per-Create count verification*), then continue.
+8. **Pacing**: wait ~6s before the next prompt in the same group; wait 30s when the next prompt is from a different group. (`computer` `wait` caps at 10s — chain three of them for the 30s gap.)
 
-> **Reliable field fill — `form_input` first, JS native-setter as fallback.** `form_input` on the found refs is the default. If it ever lands text in the wrong field, or the Lyrics editor refuses input (it is a React `<textarea>`; synthetic clicks + `ctrl+a` can mis-target and `ctrl+a` may trigger "select all clips" instead), fall back to the React native value setter, which is rock-solid:
-> ```js
-> (() => { const set=(el,v)=>{const p=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
->   Object.getOwnPropertyDescriptor(p,'value').set.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));};
->   const byPh=s=>[...document.querySelectorAll('textarea,input')].find(e=>(e.placeholder||'').includes(s));
->   set(byPh('Write some lyrics'), `LYRICS`); set(byPh('afrikaans, big drop'), `STYLE`);
->   set(byPh('Song Title'), `TITLE`); set(byPh('Exclude styles'), `EXCLUDE`); })()
-> ```
-> Match the textarea/input by placeholder substring (Lyrics → "Write some lyrics", Styles → "afrikaans, big drop", Title → "Song Title", Exclude → "Exclude styles"). Read a value back to confirm. This is the verified-reliable path when driving the form purely by JS.
+> **Why not `form_input` for lyrics**: the Lyrics box is **not** an input/textarea, so `form_input` and native value setters silently do nothing. Clipboard + real `ctrl+v` is the only path. Style / Exclude / Title *are* plain inputs — the native setter above is reliable for them and avoids a `find` round-trip per prompt.
 
 #### SET_SLIDERS procedure
 
@@ -238,7 +243,24 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 
 ## UI notes & gotchas
 
-- **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then `computer` click the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.)
+- **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts; EP23, 33 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then focus the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.)
+- **Focus the lyrics editor with JS, NEVER by clicking a coordinate.** Use:
+  ```js
+  document.querySelector('[aria-label="Lyrics editor"]').focus()
+  ```
+  then send `ctrl+a` / `ctrl+v`. Keyboard events go to the focused element, so this is immune to layout shift. **After the first Create the left create-panel scrolls down** — the Styles box slides up into where the lyrics box used to be, so a coordinate that was correct for prompt 1 pastes the entire lyric into **Styles** on prompt 2 (hit exactly this in EP23; the lyrics field still held the previous prompt's text). Coordinates are only safe before the first Create, and there is no reason to use them at all.
+- **The clipboard is a shared resource — verify before every Create.** While a batch is running, anything the user copies (a chat message, a URL) silently replaces the lyrics you are about to paste. This happened **twice** in EP23. The verification step below is the only defence, and it works: both incidents were caught before Create, so nothing was mis-submitted and no credits were wasted.
+- **Mandatory pre-Create verification.** After filling, read back in one JS call and check all of it before clicking Create:
+  ```js
+  (()=>{const byPh=s=>[...document.querySelectorAll('textarea,input')].find(e=>(e.placeholder||'').includes(s));
+    const e=document.querySelector('[aria-label="Lyrics editor"]');
+    return {paras:e.querySelectorAll('p').length, head:e.innerText.slice(0,50), end:e.innerText.trim().endsWith('[End]'),
+      styleHead:byPh('emotive delivery').value.slice(0,50), title:byPh('Song Title').value,
+      w:document.querySelector('[aria-label="Weirdness"]').getAttribute('aria-valuenow'),
+      si:document.querySelector('[aria-label="Style Influence"]').getAttribute('aria-valuenow')};})()
+  ```
+  Assert: paragraph count matches the prompt's lyric lines, `end` is true, `head` starts with `[`, `styleHead` is the style (**not** a `[`-prefixed lyric — that means the paste went into the wrong field), title/W/SI match. Anything off → re-copy, re-paste, re-verify. **Do not click Create on an unverified form.**
+- **`computer` `key` rejects `repeat: 0`.** When a prompt's W/SI equal the previous prompt's, skip the slider calls entirely — passing `repeat: 0` errors out and aborts the rest of the batch.
 - **Slider race after filling Styles**: the style `input` event re-renders the form and steals focus, so a `.focus()` fired in the same batch may land on a dead node and the arrow keys go nowhere (EP22: W stayed at 35 instead of 25). **Wait ~1s after filling text fields before focusing a slider**, and ALWAYS read back `aria-valuenow` before clicking Create — nudge if off.
 - **Per-Create count verification**: after every Create, read the workspace's "N songs" counter from the page (`[...document.querySelectorAll('*')].filter(e=>/songs$/.test(e.textContent)&&!e.children.length).pop()`) and assert it went **+2**. Catching a missed submit immediately beats reconciling 40 prompts afterwards. Don't scan clip titles from the DOM instead — the list is virtualised, only visible rows exist.
 - **If token-reading JS returns `{}`**: prefix the whole IIFE with `await` (unawaited-promise serialisation regression), and remember JS **side effects still ran** — check UI state before re-running anything that creates/submits, or you'll double-pay. Workspace creation via ENSURE_WORKSPACE has silently succeeded this way (EP22).
