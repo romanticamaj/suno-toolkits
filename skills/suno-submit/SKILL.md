@@ -53,6 +53,20 @@ Per prompt: `id`, `name`, `name_zh`, `style`, `lyrics` (string or null), `negati
 
 ### Step 1 — Resolve inputs & build the queue
 
+**Use the shipped helper — do not re-derive the queue by hand.** Title construction, the `NO `-strip,
+and the UTF-16LE clipboard write are all easy to get subtly wrong (inconsistent `short_name` across
+folders is the classic result, and it corrupts every downloaded filename afterwards):
+
+```bash
+node "skills/suno-submit/scripts/queue.mjs" "<prompts.json|episode folder>" list            # numbered queue + TOTAL=
+node "skills/suno-submit/scripts/queue.mjs" "<path>" list --only 01                         # one prompt per group (baseline)
+node "skills/suno-submit/scripts/queue.mjs" "<path>" 7 --clip                               # item 7's fields + lyrics → clipboard
+```
+
+`list` warns if `short_name` differs between folders. A single `--clip` call is Step 5's item 0.
+Selector tiers: `group:id` → exact `id` **in every group** → exact `name` → unique title substring
+(ambiguous substrings stop with the candidates listed).
+
 1. Resolve `path` → list of `prompts.json` files (sorted).
 2. Read each. Build an ordered queue of prompt objects, each tagged with its **group** (= source file), a **group token** (the `BGM_NN` from the folder name, or the file's parent folder name), and the computed **title**.
 3. **Apply `--only` filter** (if given):
@@ -107,10 +121,13 @@ Do this **once** before the loop. The audio condition, its Cover/Inspiration mod
 
 Process the queue in order. For each prompt:
 
-0. **Put this prompt's lyrics on the system clipboard** (Bash, before touching the browser) — the Lyrics box is a Lexical contenteditable and clipboard paste is the only fill that works. On Windows pipe UTF-16LE into `clip` so CJK survives:
-   ```js
-   execFileSync('clip', { input: Buffer.from(lyrics, 'utf16le') })
+0. **Put this prompt's lyrics on the system clipboard** (Bash, before touching the browser) — the Lyrics box is a Lexical contenteditable and clipboard paste is the only fill that works:
+   ```bash
+   node "skills/suno-submit/scripts/queue.mjs" "<path>" <n> --clip
    ```
+   It prints the prompt's `style` / `exclude` / `title` / `w` / `si` for the next step and reports
+   `lyricsLines` + `endsWithEnd` so you can eyeball the skeleton before filling. (Internally it writes
+   **UTF-16LE** to `clip` — plain UTF-8 mangles CJK.)
 1. **Fill Styles / Exclude / Title by JS native setter, then focus the lyrics editor** (one `browser_batch`) — three plain inputs matched by placeholder substring, then a coordinate-free focus:
    ```js
    (() => { const set=(el,v)=>{const p=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
