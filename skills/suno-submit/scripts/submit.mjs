@@ -32,6 +32,8 @@
  * Usage:
  *   node submit.mjs "<prompts.json|episode folder>" [options]
  *
+ *   --doctor               probe every selector and exit — ~15s, touches nothing, no login prompt
+ *                          beyond the usual. Run this before starting work on a new batch.
  *   --dry-run              do everything except click Create (STRONGLY recommended first run)
  *   --only 01,BGM02:03     submit a subset (same selector rules as queue.mjs)
  *   --workspace "<name>"   override the auto-derived workspace name
@@ -40,6 +42,11 @@
  *   --gap-same <sec>       pacing within one prompts.json group (default 8)
  *   --gap-group <sec>      pacing when crossing to the next group (default 30)
  *   --slowmo <ms>          Playwright slowMo, for watching it work
+ *
+ * On any selector failure the runner writes `_submit_failure_<ts>.json` + `.png` next to the
+ * prompts: a screenshot plus the complete current shape of the create form (every input with its
+ * placeholder and aria-label, every contenteditable, every slider, every button) alongside what
+ * this script expects to find. Hand that pair to Claude and the repair needs no extra browser run.
  *
  * Exit codes: 0 = every selected prompt submitted and verified, 1 = anything else.
  */
@@ -64,6 +71,7 @@ const has = name => argv.includes('--' + name);
 
 const INPUT = path.resolve(argv[0]);
 const DRY_RUN = has('dry-run');
+const DOCTOR = has('doctor');
 const ONLY = flag('only') ? String(flag('only')).split(',').map(s => s.trim()).filter(Boolean) : null;
 const HEADLESS = has('headless');
 const SLOWMO = Number(flag('slowmo', 0)) || 0;
@@ -126,7 +134,8 @@ log(`Workspace : ${WORKSPACE}`);
 log(`Model     : ${MODEL}`);
 log(`Prompts   : ${items.length}${ONLY ? ` (filtered from ${queue.length})` : ''}`);
 log(`Profile   : ${PROFILE_DIR}`);
-if (DRY_RUN) log('MODE      : DRY RUN — the form is filled and verified, Create is never clicked');
+if (DOCTOR) log('MODE      : DOCTOR — probing selectors only, no form is touched');
+else if (DRY_RUN) log('MODE      : DRY RUN — the form is filled and verified, Create is never clicked');
 log('');
 
 // ---------------------------------------------------------------- playwright
@@ -158,16 +167,21 @@ page.setDefaultTimeout(30000);
 
 const results = [];
 let failed = 0;
+let capturedOnce = false;   // diagnostics are dumped once per run, not once per failing prompt
 
 try {
-  await run();
+  if (DOCTOR) { failed = await doctor() ? 0 : 1; }
+  else await run();
 } catch (e) {
   console.error('\n✗ aborted: ' + (e && e.stack || e));
+  // Capture the scene BEFORE the browser closes — otherwise fixing this costs an extra
+  // launch just to see what the UI looks like now.
+  await captureDiagnostics(String((e && e.message) || e));
   failed = failed || 1;
 } finally {
-  await writeResult();
-  if (!DRY_RUN) log('\nLeaving the browser open for 10s so you can eyeball the queue…');
-  await sleep(DRY_RUN ? 1000 : 10000);
+  if (!DOCTOR) await writeResult();
+  if (!DRY_RUN && !DOCTOR) log('\nLeaving the browser open for 10s so you can eyeball the queue…');
+  await sleep(DRY_RUN || DOCTOR ? 1000 : 10000);
   await ctx.close();
 }
 process.exit(failed ? 1 : 0);
@@ -209,6 +223,12 @@ async function run() {
       console.error('  ✗ pre-Create verification failed: ' + v.problems.join('; '));
       console.error('    (nothing was submitted for this prompt)');
       results.push({ ...brief(item), submitted: false, error: v.problems.join('; ') });
+      // A failed verification is the usual first sign of UI drift. Capture the scene ONCE —
+      // repeating it for all 36 prompts would bury the useful one under identical copies.
+      if (!capturedOnce) {
+        capturedOnce = true;
+        await captureDiagnostics(`pre-Create verification failed on ${item.title}: ${v.problems.join('; ')}`);
+      }
       failed++;
       continue;
     }
@@ -317,18 +337,48 @@ async function ensureWorkspace(name) {
 async function gotoWorkspace(projectId) {
   await page.goto(`https://suno.com/create?wid=${projectId}`, { waitUntil: 'domcontentloaded' });
   await sleep(4000);
-  const shown = await page.evaluate(() => {
-    const lbl = [...document.querySelectorAll('*')]
-      .filter(e => !e.children.length && /^Save to/.test((e.textContent || '').trim())).pop();
-    if (!lbl) return null;
-    const row = lbl.closest('div');
-    const btn = row && row.querySelector('button');
-    return btn ? (btn.textContent || '').trim() : null;
-  });
+  const shown = await readSaveToLabel();
   if (shown && shown !== WORKSPACE) {
     throw new Error(`workspace did not switch — "Save to" shows "${shown}", expected "${WORKSPACE}"`);
   }
-  if (!shown) console.error('  ⚠ could not read the "Save to" button; continuing on the ?wid= URL');
+  if (!shown) console.error('  ⚠ could not read the "Save to" button — relying on the clip-count check');
+}
+
+/**
+ * Best-effort read of the workspace shown next to "Save to…".
+ *
+ * This is an EARLY WARNING, not the safety net. The real guarantee is `expectClipCount`, which
+ * polls the specific project_id: if ?wid= ever stopped routing Creates into that workspace, the
+ * count would not rise and the run stops after the FIRST prompt — one wasted generation, not 36.
+ * So a null here is a warning, never a hard failure; the label markup is far more likely to be
+ * restyled than the routing is to break.
+ *
+ * Two strategies because the label and its button are not reliably siblings: a Playwright text
+ * locator first, then a walk UP to the nearest ancestor that actually contains a button.
+ */
+async function readSaveToLabel() {
+  try {
+    const lbl = page.getByText(/^Save to/).last();
+    if (await lbl.count().catch(() => 0)) {
+      const btn = lbl.locator('xpath=ancestor::*[.//button][1]//button[1]');
+      if (await btn.count().catch(() => 0)) {
+        const t = (await btn.first().innerText().catch(() => '')).trim();
+        if (t) return t;
+      }
+    }
+  } catch { /* fall through */ }
+  return page.evaluate(() => {
+    const txt = e => (e.textContent || '').trim();
+    const leaf = [...document.querySelectorAll('*')]
+      .filter(e => !e.children.length && /^Save to/i.test(txt(e))).pop();
+    if (!leaf) return null;
+    let cur = leaf;
+    for (let d = 0; cur && d < 8; d++, cur = cur.parentElement) {
+      const b = cur.querySelector && cur.querySelector('button');
+      if (b) return txt(b) || null;
+    }
+    return null;
+  }).catch(() => null);
 }
 
 // ---------------------------------------------------------------- form chrome
@@ -578,6 +628,151 @@ async function finalVerify(projectId) {
     failed++;
   } else {
     log('✓ every submitted title has exactly 2 clips — no double submits');
+  }
+}
+
+// ---------------------------------------------------------------- doctor & diagnostics
+
+/**
+ * Probe every selector this runner depends on, and touch nothing.
+ *
+ * Suno's create form drifts (the Styles placeholder became randomised, a second "Song Title"
+ * input appeared, the panel started scrolling after the first Create). Both submit paths have
+ * been broken by that at least three times. `--doctor` turns "it broke somewhere in a 36-prompt
+ * batch" into a 15-second yes/no you can run before starting work, and when something IS wrong
+ * it prints the nearest candidates so the fix is one edit rather than an investigation.
+ */
+async function doctor() {
+  log('Running selector health check…\n');
+  await ensureLoggedIn();
+  await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
+  await sleep(4000);
+  await ensureAdvancedTab();
+  await ensureMoreOptions().catch(() => {});
+
+  const probe = await page.evaluate(() => {
+    const txt = e => (e.textContent || '').trim();
+    const els = [...document.querySelectorAll('textarea,input')];
+    const xi = els.findIndex(e => (e.placeholder || '').includes('Exclude styles'));
+    const buttons = [...document.querySelectorAll('button')]
+      .map(b => ({ text: txt(b).slice(0, 40), label: b.getAttribute('aria-label') }))
+      .filter(b => b.text || b.label);
+    return {
+      xi,
+      fields: els.map((e, i) => ({ i, tag: e.tagName, placeholder: (e.placeholder || '').slice(0, 45) })),
+      lyricsEditor: !!document.querySelector('[aria-label="Lyrics editor"]'),
+      sliders: [...document.querySelectorAll('[role=slider]')].map(s => s.getAttribute('aria-label')),
+      buttons,
+      modelButton: (() => {
+        const b = [...document.querySelectorAll('button')].find(e => /^v\d/.test(txt(e)));
+        return b ? txt(b) : null;
+      })(),
+    };
+  });
+
+  const checks = [];
+  const add = (ok, name, detail) => { checks.push({ ok, name, detail }); log(`${ok ? '✓' : '✗'} ${name}${detail ? '  — ' + detail : ''}`); };
+
+  add(true, 'signed in');
+  if (probe.xi >= 1) {
+    const f = probe.fields;
+    add(true, '"Exclude styles" anchor', `xi=${probe.xi} → Styles[${probe.xi - 1}] / Exclude[${probe.xi}] / Title[${probe.xi + 1}]`);
+  } else {
+    add(false, '"Exclude styles" anchor', 'not found — field addressing is broken');
+    log('    inputs currently on the page:');
+    for (const f of probe.fields) log(`      [${f.i}] ${f.tag} placeholder="${f.placeholder}"`);
+  }
+  add(probe.lyricsEditor, '[aria-label="Lyrics editor"]',
+    probe.lyricsEditor ? null : 'not found — the lyrics box was renamed or is not rendered');
+
+  for (const want of ['Weirdness', 'Style Influence']) {
+    const ok = probe.sliders.includes(want);
+    add(ok, `slider [aria-label="${want}"]`, ok ? null : `present sliders: ${probe.sliders.join(', ') || '(none)'}`);
+  }
+
+  const createBtn = probe.buttons.find(b => b.label === 'Create song' || /^Create( song)?$/i.test(b.text));
+  if (createBtn) add(true, 'Create button', `text="${createBtn.text}" aria-label="${createBtn.label ?? ''}"`);
+  else {
+    add(false, 'Create button', 'no button matching "Create song" / "Create"');
+    const near = probe.buttons.filter(b => /creat|generat|submit/i.test(b.text + ' ' + (b.label || '')));
+    log('    nearest candidates: ' + (near.length ? near.map(b => `"${b.text}"`).join(', ') : '(none)'));
+  }
+
+  // Warning only: the clip-count check on the specific project_id is the real workspace guard.
+  const saveTo = await readSaveToLabel();
+  if (saveTo) log(`✓ "Save to" workspace button  — shows "${saveTo}"`);
+  else log('⚠ "Save to" workspace button  — not readable; the clip-count check still guards routing');
+  add(probe.modelButton !== null, 'model selector', probe.modelButton ? `shows "${probe.modelButton}"` : 'not found');
+
+  const bad = checks.filter(c => !c.ok);
+  log('');
+  if (!bad.length) { log('✓ all selectors healthy — submit.mjs should run'); return true; }
+
+  const file = await captureDiagnostics(`--doctor: ${bad.length} selector(s) failed`);
+  log(`✗ ${bad.length} selector(s) failed: ${bad.map(b => b.name).join(', ')}`);
+  log('  Suno\'s UI has drifted. Hand the diagnostics file below to Claude and ask it to');
+  log('  update submit.mjs — it contains the full current form shape, so no re-run is needed.');
+  if (file) log(`  → ${file}`);
+  return false;
+}
+
+/**
+ * Dump everything needed to repair a selector break, so the fix does not require re-running
+ * the browser just to look: a screenshot plus the full current shape of the create form.
+ */
+async function captureDiagnostics(reason) {
+  try {
+    const outDir = fs.statSync(INPUT).isDirectory() ? INPUT : path.dirname(INPUT);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const shotPath = path.join(outDir, `_submit_failure_${stamp}.png`);
+    const jsonPath = path.join(outDir, `_submit_failure_${stamp}.json`);
+
+    await page.screenshot({ path: shotPath, fullPage: false }).catch(() => {});
+
+    const dom = await page.evaluate(() => {
+      const txt = e => (e.textContent || '').trim();
+      return {
+        url: location.href,
+        inputs: [...document.querySelectorAll('textarea,input')].map((e, i) => ({
+          i, tag: e.tagName, type: e.type || null,
+          placeholder: e.placeholder || null,
+          ariaLabel: e.getAttribute('aria-label'),
+          valueHead: (e.value || '').slice(0, 60),
+        })),
+        contentEditables: [...document.querySelectorAll('[contenteditable]')].map(e => ({
+          ariaLabel: e.getAttribute('aria-label'), cls: (e.className || '').toString().slice(0, 80),
+        })),
+        sliders: [...document.querySelectorAll('[role=slider]')].map(s => ({
+          ariaLabel: s.getAttribute('aria-label'), value: s.getAttribute('aria-valuenow'),
+        })),
+        buttons: [...document.querySelectorAll('button')]
+          .map(b => ({ text: txt(b).slice(0, 50), ariaLabel: b.getAttribute('aria-label') }))
+          .filter(b => b.text || b.ariaLabel),
+      };
+    }).catch(() => null);
+
+    fs.writeFileSync(jsonPath, JSON.stringify({
+      reason,
+      at: new Date().toISOString(),
+      runner: 'submit.mjs',
+      expects: {
+        fieldAnchor: 'input whose placeholder contains "Exclude styles"; Styles = xi-1, Title = xi+1',
+        lyrics: '[aria-label="Lyrics editor"] (Lexical contenteditable, clipboard + real ctrl+v)',
+        sliders: ['[aria-label="Weirdness"]', '[aria-label="Style Influence"]'],
+        create: 'button named "Create song" (falls back to any button containing "Create")',
+        workspace: 'navigate to /create?wid=<project_id>, verify via the "Save to" button',
+      },
+      dom,
+    }, null, 2));
+
+    log('');
+    log('Diagnostics written (hand these to Claude to repair submit.mjs — no re-run needed):');
+    log('  ' + jsonPath);
+    log('  ' + shotPath);
+    return jsonPath;
+  } catch (e) {
+    console.error('  (could not write diagnostics: ' + (e && e.message) + ')');
+    return null;
   }
 }
 

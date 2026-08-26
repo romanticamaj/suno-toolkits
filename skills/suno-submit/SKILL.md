@@ -1,7 +1,7 @@
 ---
 name: suno-submit
 description: Batch-submit prompts.json files to Suno. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence, vocal gender), optionally attaches a workspace clip as an audio reference (Cover/Inspiration) with a set Audio Influence applied to every prompt, and clicks Create with paced timing. Prefers the scripted Playwright runner (scripts/submit.mjs) which runs the whole batch in one process; falls back to a model-driven Claude in Chrome loop. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Suno Submit
@@ -39,7 +39,42 @@ node skills/suno-submit/scripts/submit.mjs "<episode folder>"             # then
 
 **Always offer `--dry-run` before the real run on a new episode.** It performs every step — workspace switch, form fill, lyric paste, sliders, full pre-Create verification — and stops short of clicking Create. It costs nothing, creates nothing, and catches a UI drift before it can waste credits.
 
-Options: `--only 01,BGM02:03` · `--workspace "<name>"` · `--profile "<dir>"` · `--gap-same <sec>` (default 8) · `--gap-group <sec>` (default 30) · `--slowmo <ms>` · `--headless` (don't — see below).
+Options: `--doctor` · `--only 01,BGM02:03` · `--workspace "<name>"` · `--profile "<dir>"` · `--gap-same <sec>` (default 8) · `--gap-group <sec>` (default 30) · `--slowmo <ms>` · `--headless` (don't — see below).
+
+### Handling UI drift — the part that actually matters
+
+A script is more brittle than a model *per change*, but this is the better trade, for a reason worth
+stating plainly: **the model-driven path never survived UI drift either.** Every gotcha in this file
+was written after path B broke on it. Worse, path B sometimes does not break — it improvises into the
+wrong action. The coordinate bug pasted a full lyric into the Styles box, reported success, and
+spent a generation on garbage. A script that throws `no "Exclude styles" anchor` is the safer failure.
+
+So the loop is: detect drift for free, then repair with evidence in hand.
+
+```bash
+node skills/suno-submit/scripts/submit.mjs "<folder>" --doctor    # ~15s, touches nothing
+```
+
+`--doctor` probes every selector the runner depends on and prints a health report — the anchor
+index and the three fields it resolves to, the lyrics editor, both sliders, the Create button, the
+model selector. When something is missing it prints the **nearest candidates** found on the page, so
+the fix is usually a one-line edit rather than an investigation.
+
+**On any failure — `--doctor`, an exception, or the first failed pre-Create verification — the runner
+writes a diagnostics pair next to the prompts:**
+
+```
+_submit_failure_<timestamp>.json   full current form shape + what the script expected
+_submit_failure_<timestamp>.png    screenshot
+```
+
+The JSON lists every input with its placeholder and aria-label, every contenteditable, every slider,
+every button, plus the script's own expectations. Hand that pair to Claude and ask it to update
+`submit.mjs` — **no second browser run is needed to diagnose**, which is what keeps the repair cheap.
+Diagnostics are captured once per run, not once per failing prompt.
+
+Escalation ladder when a batch is urgent and the script is broken: run path B for this episode, then
+fix the script from the diagnostics afterwards. Breakage is never blocking, only more expensive once.
 
 ### Login model
 
@@ -326,7 +361,7 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 > Shared by both paths. `scripts/submit.mjs` encodes every item below; if you change one, change it in both places.
 
 - **Never locate a form field by its placeholder text alone.** The Styles box ships a **randomised** sample placeholder — observed as `emotive delivery, trance influence, …`, `calm atmosphere, adventurous, dynamic drops, melodic metal, retro 80s`, and others — so matching on any one of them breaks at random. The page also renders **two** `Song Title (Optional)` inputs. The only stable handle is DOM order around the one placeholder that never changes: find the index `xi` of the input whose placeholder contains `Exclude styles`, then **`els[xi-1]` = Styles, `els[xi]` = Exclude, `els[xi+1]` = Song Title** over `[...document.querySelectorAll('textarea,input')]`. (Verified again on the EP26 batch, where `xi` was 4 — the absolute index also drifts between renders, so recompute it every prompt.)
-- **The workspace can be selected by URL.** Picking one in the "Save to…" dropdown rewrites the URL to `/create?wid=<project_id>`, and loading that URL directly preselects it — much more robust than driving the dropdown, and it survives a page reload. Still read the "Save to" button back afterwards as a guard: silently filing a whole batch into the wrong workspace is far worse than failing loudly.
+- **The workspace can be selected by URL.** Picking one in the "Save to…" dropdown rewrites the URL to `/create?wid=<project_id>`, and loading that URL directly preselects it — much more robust than driving the dropdown, and it survives a page reload. Read the "Save to" button back afterwards as an early warning, but treat a *null* read as a warning only: the label and its button are not reliable siblings and the markup is easy to restyle. The real guard against filing a batch into the wrong workspace is the per-Create clip-count check against that specific `project_id` — if routing ever broke, the count would not rise and the run stops after the **first** prompt, costing one generation rather than the whole batch.
 - **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts; EP23, 33 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then focus the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.) **Path A uses the *page* clipboard instead** (`navigator.clipboard.writeText` under a granted permission) — same real `ctrl+v`, but immune to the OS-clipboard clobber below.
 - **Focus the lyrics editor with JS, NEVER by clicking a coordinate.** Use:
   ```js
