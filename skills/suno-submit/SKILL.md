@@ -1,12 +1,75 @@
 ---
 name: suno-submit
-description: Batch-submit prompts.json files to Suno via Claude in Chrome. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence, vocal gender), optionally attaches a workspace clip as an audio reference (Cover/Inspiration) with a set Audio Influence applied to every prompt, and clicks Create with paced timing. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
-version: 1.1.0
+description: Batch-submit prompts.json files to Suno. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence, vocal gender), optionally attaches a workspace clip as an audio reference (Cover/Inspiration) with a set Audio Influence applied to every prompt, and clicks Create with paced timing. Prefers the scripted Playwright runner (scripts/submit.mjs) which runs the whole batch in one process; falls back to a model-driven Claude in Chrome loop. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
+version: 1.2.0
 ---
 
 # Suno Submit
 
-Batch-submit one or more `prompts.json` files to Suno's Advanced create form, all into a named workspace, via the Claude in Chrome browser tools.
+Batch-submit one or more `prompts.json` files to Suno's Advanced create form, all into a named workspace.
+
+## Two paths — pick the scripted one by default
+
+| | **A · Scripted** (`scripts/submit.mjs`, Playwright) | **B · Model-driven** (Claude in Chrome) |
+|---|---|---|
+| Model round-trips | ~4 total | ~3 **per prompt** (≈110 for 36) |
+| Relative token cost | 1× | ~15× |
+| Needs `claude --chrome` | no | yes |
+| Login | its own persistent Chrome profile, one manual sign-in ever | your existing Chrome session |
+| Audio reference (Cover/Inspiration) | ✗ not automated | ✓ |
+| Recovering from an unexpected UI change | poor — it throws | good — Claude can look and adapt |
+
+**Default to A.** Reach for B when a prompt sets `audio_reference`, when A fails on a UI change and the user needs the batch out now, or when the user explicitly asks to watch it happen step by step.
+
+Both paths drive the same form the same way and share `scripts/lib/queue-core.mjs`, so titles, exclude-tag stripping and `--only` behave identically. **The "UI notes & gotchas" section near the end of this file is the shared source of truth for both** — read it before changing either path.
+
+After Suno finishes generating (minutes later), use **`/suno-download`** to fetch the WAVs.
+
+---
+
+## Path A — the scripted runner
+
+```bash
+cd /path/to/suno-toolkits
+npm install && npx playwright install chrome      # once
+
+node skills/suno-submit/scripts/submit.mjs "<episode folder>" --dry-run   # verify first
+node skills/suno-submit/scripts/submit.mjs "<episode folder>"             # then submit
+```
+
+**Always offer `--dry-run` before the real run on a new episode.** It performs every step — workspace switch, form fill, lyric paste, sliders, full pre-Create verification — and stops short of clicking Create. It costs nothing, creates nothing, and catches a UI drift before it can waste credits.
+
+Options: `--only 01,BGM02:03` · `--workspace "<name>"` · `--profile "<dir>"` · `--gap-same <sec>` (default 8) · `--gap-group <sec>` (default 30) · `--slowmo <ms>` · `--headless` (don't — see below).
+
+### Login model
+
+`submit.mjs` opens a **dedicated persistent Chrome profile** — default `%LOCALAPPDATA%\suno-toolkits-profile` (macOS `~/Library/Application Support/…`, Linux `$XDG_DATA_HOME/…`). First run it waits at a prompt while you sign in to Suno in that window; every run after reuses the session like any browser profile.
+
+- **No API key, no exported cookie file, no password** ever reaches the script.
+- That directory holds **real credentials** — it lives outside the repo on purpose. Never point `--profile` inside a repo, and never commit one.
+- A **dedicated** profile is required, not cosmetic: Chrome ignores `--remote-debugging-port` on the default profile (security, Chrome 111+), and a profile directory is file-locked, so Playwright cannot open one that Chrome already has open. With its own profile the runner coexists with your normal browsing and with Claude in Chrome.
+
+### Why headed, and why real Chrome
+
+`channel: 'chrome'` + `headless: false` is deliberate: it keeps the fingerprint close to ordinary manual use (the older localhost API path was abandoned when anti-bot handling broke it), and headless Chrome is unreliable for both clipboard permissions and the real key events the Lexical lyrics editor needs.
+
+### One genuine improvement over path B
+
+The scripted runner writes lyrics to the **page** clipboard (`navigator.clipboard.writeText` under a granted permission), not the OS clipboard. Nothing the user copies mid-run can clobber a pending paste — a failure that hit path B twice in one episode.
+
+### Output
+
+Writes `_submit_result.json` next to the prompts (workspace, model, per-prompt submitted/failed) and prints a one-line summary. Exit `0` only if every selected prompt was submitted **and** final verification found exactly 2 clips per title. Read that file rather than re-deriving what happened.
+
+### When it stops
+
+On a failed pre-Create verification it **skips that prompt and continues**; on an unconfirmed clip count it **stops the whole run**. Neither ever retries a Create — a blind retry double-charges. If a run stops mid-batch, check the workspace, then resume with `--only` listing what is still missing.
+
+---
+
+## Path B — the model-driven loop (Claude in Chrome)
+
+Everything from "Prerequisites" onward describes this path.
 
 ## When to use
 
@@ -260,7 +323,11 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 
 ## UI notes & gotchas
 
-- **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts; EP23, 33 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then focus the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.)
+> Shared by both paths. `scripts/submit.mjs` encodes every item below; if you change one, change it in both places.
+
+- **Never locate a form field by its placeholder text alone.** The Styles box ships a **randomised** sample placeholder — observed as `emotive delivery, trance influence, …`, `calm atmosphere, adventurous, dynamic drops, melodic metal, retro 80s`, and others — so matching on any one of them breaks at random. The page also renders **two** `Song Title (Optional)` inputs. The only stable handle is DOM order around the one placeholder that never changes: find the index `xi` of the input whose placeholder contains `Exclude styles`, then **`els[xi-1]` = Styles, `els[xi]` = Exclude, `els[xi+1]` = Song Title** over `[...document.querySelectorAll('textarea,input')]`. (Verified again on the EP26 batch, where `xi` was 4 — the absolute index also drifts between renders, so recompute it every prompt.)
+- **The workspace can be selected by URL.** Picking one in the "Save to…" dropdown rewrites the URL to `/create?wid=<project_id>`, and loading that URL directly preselects it — much more robust than driving the dropdown, and it survives a page reload. Still read the "Save to" button back afterwards as a guard: silently filing a whole batch into the wrong workspace is far worse than failing loudly.
+- **Lyrics is a Lexical contenteditable, NOT a textarea** (`[aria-label="Lyrics editor"]`). React native-value setters do nothing, synthetic `ClipboardEvent('paste')` is ignored (untrusted), and `execCommand('insertText')` EATS ALL NEWLINES (every section tag collapses onto one line). The ONLY reliable fill (verified EP22, 56 prompts; EP23, 33 prompts): write the lyrics to the **system clipboard** (`node -e "process.stdout.write(...)" | clip`), then focus the editor → `ctrl+a` → `ctrl+v`. Verify with `el.querySelectorAll('p').length`. Bonus: lyrics never transit the model context. (Style/Exclude/Title are still plain inputs — native setter works for those.) **Path A uses the *page* clipboard instead** (`navigator.clipboard.writeText` under a granted permission) — same real `ctrl+v`, but immune to the OS-clipboard clobber below.
 - **Focus the lyrics editor with JS, NEVER by clicking a coordinate.** Use:
   ```js
   document.querySelector('[aria-label="Lyrics editor"]').focus()
