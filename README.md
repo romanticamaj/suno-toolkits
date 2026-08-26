@@ -30,13 +30,19 @@ A Claude Code plugin that automates [Suno AI](https://suno.com) — batch-submit
 /suno-toolkits:suno-download  <workspace>  → WAV + metadata JSON to disk
 ```
 
-Or drive the submit directly, with no model in the loop at all:
+`/suno-submit` runs the Playwright script for you — it builds the queue, confirms the credit
+spend, health-checks the selectors, launches the batch in the background and reports from
+`_submit_result.json`. You do not type the script path.
+
+To drive it yourself instead:
 
 ```bash
 npm install && npx playwright install chrome                     # once
 
-node skills/suno-submit/scripts/submit.mjs "<folder>" --dry-run   # fill + verify, never Create
-node skills/suno-submit/scripts/submit.mjs "<folder>"             # for real
+node skills/suno-submit/scripts/submit.mjs --login                 # one-time sign-in
+node skills/suno-submit/scripts/submit.mjs "<folder>" --doctor     # ~15s selector health check
+node skills/suno-submit/scripts/submit.mjs "<folder>" --dry-run    # fill + verify, never Create
+node skills/suno-submit/scripts/submit.mjs "<folder>"              # for real
 ```
 
 The script keeps its own Chrome profile (outside this repo) and asks you to sign in once. It

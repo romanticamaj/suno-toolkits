@@ -1,33 +1,108 @@
 ---
 name: suno-submit
-description: Batch-submit prompts.json files to Suno. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Creates/switches to a named workspace, fills the Advanced create form per prompt (style, lyrics, exclude, title, model, Weirdness/Style Influence, vocal gender), optionally attaches a workspace clip as an audio reference (Cover/Inspiration) with a set Audio Influence applied to every prompt, and clicks Create with paced timing. Prefers the scripted Playwright runner (scripts/submit.mjs) which runs the whole batch in one process; falls back to a model-driven Claude in Chrome loop. Supports an --only selector to submit just specific prompts (by id, name, or BGM group) instead of the whole batch. Pairs with /suno-download to fetch the results.
-version: 1.3.0
+description: Batch-submit prompts.json files to Suno by running scripts/submit.mjs. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Do NOT drive the create form turn by turn - launch the script, which creates/switches the workspace and fills style, lyrics, exclude, title, model, Weirdness/Style Influence and vocal gender for every prompt in one process, then read _submit_result.json. It signs in through its own persistent Chrome profile (one-time --login), self-checks with --doctor, and dumps repair diagnostics when Suno's UI drifts. A model-driven Claude in Chrome loop remains as the documented fallback for audio references and for urgent batches when the script is broken. Supports an --only selector for a subset. Pairs with /suno-download to fetch the results.
+version: 1.4.0
 ---
 
 # Suno Submit
 
 Batch-submit one or more `prompts.json` files to Suno's Advanced create form, all into a named workspace.
 
-## Two paths — pick the scripted one by default
+## What this skill does
 
-| | **A · Scripted** (`scripts/submit.mjs`, Playwright) | **B · Model-driven** (Claude in Chrome) |
-|---|---|---|
-| Model round-trips | ~4 total | ~3 **per prompt** (≈110 for 36) |
-| Relative token cost | 1× | ~15× |
-| Needs `claude --chrome` | no | yes |
-| Login | its own persistent Chrome profile, one manual sign-in ever | your existing Chrome session |
-| Audio reference (Cover/Inspiration) | ✗ not automated | ✓ |
-| Recovering from an unexpected UI change | poor — it throws | good — Claude can look and adapt |
+**Run the script. Do not drive the browser by hand.** `scripts/submit.mjs` performs the entire
+batch in one process; your job is to prepare the queue, get the user's go-ahead on the credit
+spend, launch it, and report what came back. A 36-prompt batch costs ~4 model turns this way
+versus ~110 driving the form yourself.
 
-**Default to A.** Reach for B when a prompt sets `audio_reference`, when A fails on a UI change and the user needs the batch out now, or when the user explicitly asks to watch it happen step by step.
+Path B (the model-driven Claude-in-Chrome loop, documented further down) is the **fallback**, not
+an equal option. Use it only when one of these is true:
 
-Both paths drive the same form the same way and share `scripts/lib/queue-core.mjs`, so titles, exclude-tag stripping and `--only` behave identically. **The "UI notes & gotchas" section near the end of this file is the shared source of truth for both** — read it before changing either path.
-
-After Suno finishes generating (minutes later), use **`/suno-download`** to fetch the WAVs.
+- a prompt sets `audio_reference` (the script refuses those up front — the Browse/Remix modal is not automated)
+- the script fails on a UI change and the user needs this batch out **now**
+- the user explicitly asks to watch it step by step
 
 ---
 
-## Path A — the scripted runner
+## Workflow (Path A — default)
+
+### Step 1 · Build the queue and show it
+
+No browser yet — this is free and catches bad input immediately.
+
+```bash
+node "<skill>/scripts/queue.mjs" "<path>" list            # add --only <sel> if the user asked for a subset
+```
+
+Report: workspace name (the episode folder), model, prompt count, and any `⚠` the script printed
+(inconsistent `short_name` is the one that matters — it corrupts every downloaded filename later).
+
+### Step 2 · Confirm the credit spend
+
+**This creates real songs and spends credits.** Suno generates 2 per prompt. State the arithmetic —
+"36 prompts → 72 songs" — and wait for a clear yes before Step 4. Do not skip this because the user
+already said "submit"; they may not have realised the batch size.
+
+If they want to sanity-check the direction first, offer `--only 01` — one prompt per BGM group, the
+standard baseline test.
+
+### Step 3 · Health check
+
+```bash
+node "<skill>/scripts/submit.mjs" "<path>" --doctor
+```
+
+~15 seconds, opens Chrome, touches nothing, creates nothing. Three outcomes:
+
+- **All checks pass** → go to Step 4.
+- **`sign-in required (no TTY)`** → the profile has never been signed in. The Bash tool has no
+  interactive stdin, so *you cannot do this step*. Give the user the exact command the script
+  printed and ask them to run it in this session with a `! ` prefix:
+  `! node "<skill>/scripts/submit.mjs" --login`
+  It opens Chrome once, they sign in, and the session persists forever after. Then re-run Step 3.
+- **A selector failed** → Suno's UI has drifted. The script wrote `_submit_failure_<ts>.json` +
+  `.png`; read the JSON (it contains the full current form shape and what the script expected) and
+  repair `submit.mjs`. **Do not fall back to path B silently** — tell the user the script needs a
+  fix, offer path B if the batch is urgent, and fix the script either way.
+
+### Step 4 · Run it in the background
+
+A batch takes roughly `prompts × 16s + groups × 30s` — about 15 minutes for 36 prompts, well past
+the Bash tool's ceiling. **Always `run_in_background: true`.** You will be notified when it exits.
+
+```bash
+node "<skill>/scripts/submit.mjs" "<path>"               # + --only <sel> if used in Step 1
+```
+
+Do not poll it. Do not start a second run while one is in flight — both would drive the same
+profile and Chrome will refuse the second (the profile is file-locked).
+
+### Step 5 · Report from the result file
+
+Read `_submit_result.json` next to the prompts — do not re-derive from the log. Report submitted vs
+selected, and surface anything with `submitted: false` or `"unconfirmed"`.
+
+Exit `0` means every selected prompt was submitted **and** final verification found exactly 2 clips
+per title. Non-zero means read the file and say plainly what did not go out.
+
+If the run stopped mid-batch on an unconfirmed clip count: **do not blindly re-run** — that
+double-charges. Check the workspace, then resume with `--only` naming only what is actually missing.
+
+Then point at the next step: `/suno-download "<workspace name>"` once Suno has rendered (1–3 min/song).
+
+### Notes on invocation
+
+- `<skill>` is this skill's own directory — the scripts sit beside this file, so build the path from
+  it rather than assuming a repo location.
+- **First use on a machine** also needs `npm install && npx playwright install chrome` in the
+  repo root. If the script reports playwright missing, run that (foreground, it is quick), then retry.
+- Pass the user's path through verbatim, quoted. Episode folders contain spaces and CJK.
+
+---
+
+## Path A reference
+
+### Direct invocation
 
 ```bash
 cd /path/to/suno-toolkits
@@ -102,9 +177,9 @@ On a failed pre-Create verification it **skips that prompt and continues**; on a
 
 ---
 
-## Path B — the model-driven loop (Claude in Chrome)
+## Path B — the model-driven loop (Claude in Chrome) — FALLBACK ONLY
 
-Everything from "Prerequisites" onward describes this path.
+Everything from "Prerequisites" onward describes this path. Reach for it only in the three cases listed at the top of this file; otherwise run the script.
 
 ## When to use
 

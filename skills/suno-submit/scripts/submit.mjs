@@ -32,6 +32,7 @@
  * Usage:
  *   node submit.mjs "<prompts.json|episode folder>" [options]
  *
+ *   --login                sign in once for this profile, then exit (no path argument needed)
  *   --doctor               probe every selector and exit — ~15s, touches nothing, no login prompt
  *                          beyond the usual. Run this before starting work on a new batch.
  *   --dry-run              do everything except click Create (STRONGLY recommended first run)
@@ -59,8 +60,12 @@ import { buildQueue, applyOnly, shortNames, resolveModel } from './lib/queue-cor
 // ---------------------------------------------------------------- args
 
 const argv = process.argv.slice(2);
-if (!argv.length || argv[0].startsWith('--')) {
-  console.error('Usage: node submit.mjs "<prompts.json|episode folder>" [--dry-run] [--only sel] [--workspace name]');
+// `--login` is the one mode that needs no prompts — it exists so the sign-in instruction printed
+// on a non-TTY run is a single copy-pasteable command.
+const IS_LOGIN = argv.includes('--login');
+if (!IS_LOGIN && (!argv.length || argv[0].startsWith('--'))) {
+  console.error('Usage: node submit.mjs "<prompts.json|episode folder>" [--doctor] [--dry-run] [--only sel] [--workspace name]');
+  console.error('       node submit.mjs --login          # one-time sign-in for this profile');
   process.exit(1);
 }
 const flag = (name, def = null) => {
@@ -69,9 +74,10 @@ const flag = (name, def = null) => {
 };
 const has = name => argv.includes('--' + name);
 
-const INPUT = path.resolve(argv[0]);
+const INPUT = IS_LOGIN && (!argv.length || argv[0].startsWith('--')) ? process.cwd() : path.resolve(argv[0]);
 const DRY_RUN = has('dry-run');
 const DOCTOR = has('doctor');
+const LOGIN_ONLY = has('login');
 const ONLY = flag('only') ? String(flag('only')).split(',').map(s => s.trim()).filter(Boolean) : null;
 const HEADLESS = has('headless');
 const SLOWMO = Number(flag('slowmo', 0)) || 0;
@@ -106,20 +112,22 @@ const log = (...a) => console.log(...a);
 
 // ---------------------------------------------------------------- queue
 
-let queue, items;
-try {
-  queue = buildQueue(INPUT);
-  items = applyOnly(queue, ONLY);
-} catch (e) {
-  console.error('✗ ' + e.message);
-  process.exit(1);
+let queue = [], items = [];
+if (!LOGIN_ONLY) {
+  try {
+    queue = buildQueue(INPUT);
+    items = applyOnly(queue, ONLY);
+  } catch (e) {
+    console.error('✗ ' + e.message);
+    process.exit(1);
+  }
 }
-if (!items.length) { console.error('✗ nothing to submit'); process.exit(1); }
+if (!LOGIN_ONLY && !items.length) { console.error('✗ nothing to submit'); process.exit(1); }
 
-const shorts = shortNames(queue);
+const shorts = LOGIN_ONLY ? [] : shortNames(queue);
 if (shorts.length > 1) console.error('⚠ short_name is inconsistent across folders: ' + shorts.join(', '));
 
-const { model: MODEL, warning: modelWarning } = resolveModel(items);
+const { model: MODEL, warning: modelWarning } = LOGIN_ONLY ? { model: 'v5.5', warning: null } : resolveModel(items);
 if (modelWarning) console.error('⚠ ' + modelWarning);
 
 const withAudioRef = items.filter(x => x.audio_reference);
@@ -130,10 +138,13 @@ if (withAudioRef.length) {
   process.exit(1);
 }
 
-log(`Workspace : ${WORKSPACE}`);
-log(`Model     : ${MODEL}`);
-log(`Prompts   : ${items.length}${ONLY ? ` (filtered from ${queue.length})` : ''}`);
+if (!LOGIN_ONLY) {
+  log(`Workspace : ${WORKSPACE}`);
+  log(`Model     : ${MODEL}`);
+  log(`Prompts   : ${items.length}${ONLY ? ` (filtered from ${queue.length})` : ''}`);
+}
 log(`Profile   : ${PROFILE_DIR}`);
+if (LOGIN_ONLY) log('MODE      : LOGIN — sign in once, then exit');
 if (DOCTOR) log('MODE      : DOCTOR — probing selectors only, no form is touched');
 else if (DRY_RUN) log('MODE      : DRY RUN — the form is filled and verified, Create is never clicked');
 log('');
@@ -170,18 +181,24 @@ let failed = 0;
 let capturedOnce = false;   // diagnostics are dumped once per run, not once per failing prompt
 
 try {
-  if (DOCTOR) { failed = await doctor() ? 0 : 1; }
+  if (LOGIN_ONLY) {
+    await ensureLoggedIn();
+    log('');
+    log('✓ this profile is signed in — submit.mjs can now run unattended');
+  }
+  else if (DOCTOR) { failed = await doctor() ? 0 : 1; }
   else await run();
 } catch (e) {
   console.error('\n✗ aborted: ' + (e && e.stack || e));
   // Capture the scene BEFORE the browser closes — otherwise fixing this costs an extra
-  // launch just to see what the UI looks like now.
-  await captureDiagnostics(String((e && e.message) || e));
+  // launch just to see what the UI looks like now. Skipped for failures that are not about
+  // the UI (a missing sign-in), where a dump would be noise in the user's folder.
+  if (!(e && e.skipDiagnostics)) await captureDiagnostics(String((e && e.message) || e));
   failed = failed || 1;
 } finally {
-  if (!DOCTOR) await writeResult();
-  if (!DRY_RUN && !DOCTOR) log('\nLeaving the browser open for 10s so you can eyeball the queue…');
-  await sleep(DRY_RUN || DOCTOR ? 1000 : 10000);
+  if (!DOCTOR && !LOGIN_ONLY) await writeResult();
+  if (!DRY_RUN && !DOCTOR && !LOGIN_ONLY) log('\nLeaving the browser open for 10s so you can eyeball the queue…');
+  await sleep(DRY_RUN || DOCTOR || LOGIN_ONLY ? 1000 : 10000);
   await ctx.close();
 }
 process.exit(failed ? 1 : 0);
@@ -265,6 +282,29 @@ async function ensureLoggedIn() {
   await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
   await sleep(4000);
   if (await isLoggedIn()) { log('✓ already signed in'); return; }
+
+  // Without a TTY there is nobody to answer the prompt — an agent or CI would hang here until
+  // it timed out, with a Chrome window open and no indication why. Fail fast and say exactly
+  // what to run instead. `--login` exists purely so that instruction is a single command.
+  if (!process.stdin.isTTY) {
+    const p = PROFILE_DIR !== defaultProfileDir() ? ` --profile "${PROFILE_DIR}"` : '';
+    log('');
+    console.error('✗ not signed in to Suno, and there is no terminal to sign in from.');
+    if (LOGIN_ONLY) {
+      // Already the login command — telling them to run the login command would be circular.
+      console.error('  --login needs a real terminal. Run it from a shell, or in Claude Code prefix');
+      console.error('  the line with "! " so it runs in your session:');
+      console.error('');
+      console.error(`    ! node "${process.argv[1]}" --login${p}`);
+    } else {
+      console.error('  Sign in once and the session persists in the profile. From a terminal:');
+      console.error('');
+      console.error(`    node "${process.argv[1]}" --login${p}`);
+    }
+    console.error('');
+    // Not a selector problem — diagnostics would be noise, and would litter the cwd.
+    throw Object.assign(new Error('sign-in required (no TTY)'), { skipDiagnostics: true });
+  }
 
   log('');
   log('  ── First run on this profile ──');
