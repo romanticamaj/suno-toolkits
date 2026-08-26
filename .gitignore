@@ -1,3 +1,11 @@
 .DS_Store
 node_modules/
 *.log
+
+# Browser profile used by submit.mjs — contains a real Suno session. Never commit.
+# (The default location is outside the repo; this guards a --profile pointed in here.)
+*-profile/
+suno-toolkits-profile/
+
+# Per-run output written next to the prompts
+_submit_result.json

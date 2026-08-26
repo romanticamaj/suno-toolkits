@@ -1,0 +1,16 @@
+{
+  "name": "suno-toolkits",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Automate Suno AI — batch-submit prompts and download lossless WAV + full metadata.",
+  "license": "MIT",
+  "scripts": {
+    "submit": "node skills/suno-submit/scripts/submit.mjs",
+    "queue": "node skills/suno-submit/scripts/queue.mjs",
+    "postinstall-hint": "echo 'Run: npx playwright install chrome'"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
