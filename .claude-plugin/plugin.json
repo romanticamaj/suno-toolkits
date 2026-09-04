@@ -1,7 +1,7 @@
 {
   "name": "suno-toolkits",
-  "description": "Automate Suno AI music generation — batch-submit prompts.json files via Claude in Chrome, and download lossless WAV plus complete metadata sidecar JSON from any workspace.",
-  "version": "0.5.0",
+  "description": "Automate Suno AI music generation — batch-submit prompts.json files and download lossless WAV plus complete metadata sidecar JSON from any workspace, each as a single Playwright script on a shared logged-in Chrome profile.",
+  "version": "0.6.0",
   "author": {
     "name": "Gary Hsieh / uLove Music"
   },
