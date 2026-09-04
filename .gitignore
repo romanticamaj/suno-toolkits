@@ -7,5 +7,8 @@ node_modules/
 *-profile/
 suno-toolkits-profile/
 
-# Per-run output written next to the prompts
+# Per-run output written next to the prompts / into the download dir
 _submit_result.json
+_download_result.json
+_submit_failure_*.json
+_submit_failure_*.png

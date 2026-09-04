@@ -53,9 +53,11 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import readline from 'node:readline';
 import { buildQueue, applyOnly, shortNames, resolveModel } from './lib/queue-core.mjs';
+import {
+  defaultProfileDir, launchSession, sleep,
+  ensureLoggedIn as sessionEnsureLoggedIn, api as sessionApi,
+} from './lib/session.mjs';
 
 // ---------------------------------------------------------------- args
 
@@ -84,15 +86,6 @@ const SLOWMO = Number(flag('slowmo', 0)) || 0;
 const GAP_SAME = Number(flag('gap-same', 8)) * 1000;
 const GAP_GROUP = Number(flag('gap-group', 30)) * 1000;
 
-function defaultProfileDir() {
-  if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'suno-toolkits-profile');
-  }
-  if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'suno-toolkits-profile');
-  }
-  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'suno-toolkits-profile');
-}
 const PROFILE_DIR = path.resolve(String(flag('profile', defaultProfileDir())));
 
 // Workspace name: explicit override, else the episode/parent folder name. For a single file
@@ -107,7 +100,6 @@ function deriveWorkspace(input) {
 const WORKSPACE = String(flag('workspace', deriveWorkspace(INPUT)));
 
 const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 
 // ---------------------------------------------------------------- queue
@@ -151,30 +143,13 @@ log('');
 
 // ---------------------------------------------------------------- playwright
 
-let chromium;
-try {
-  ({ chromium } = await import('playwright'));
-} catch {
-  console.error('✗ playwright is not installed.');
-  console.error('  From the suno-toolkits repo root:  npm install && npx playwright install chrome');
-  process.exit(1);
-}
-
-fs.mkdirSync(PROFILE_DIR, { recursive: true });
-
-const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-  channel: 'chrome',            // the real Chrome, not bundled Chromium — closer fingerprint
-  headless: HEADLESS,
-  slowMo: SLOWMO,
-  viewport: null,
-  args: ['--start-maximized'],
+// Profile, launch flags and login live in lib/session.mjs (shared with download.mjs).
+// `clipboard: true` — writing to the *page* clipboard (not the OS one) is what makes this
+// immune to the clobber that plagues the manual path: nothing the user copies mid-run can
+// replace pending lyrics.
+const { ctx, page } = await launchSession({
+  profileDir: PROFILE_DIR, headless: HEADLESS, slowMo: SLOWMO, clipboard: true,
 });
-// Writing to the *page* clipboard (not the OS one) is what makes this immune to the clobber
-// that plagues the manual path: nothing the user copies mid-run can replace pending lyrics.
-await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://suno.com' });
-
-const page = ctx.pages()[0] || await ctx.newPage();
-page.setDefaultTimeout(30000);
 
 const results = [];
 let failed = 0;
@@ -274,76 +249,18 @@ async function run() {
   if (!DRY_RUN) await finalVerify(projectId);
 }
 
-const brief = x => ({ group: x.group, id: x.id, title: x.title, w: x.w, si: x.si });
+// Declared as a hoisted function, not `const`: the submit loop above calls it before this
+// line is evaluated, and a const arrow would sit in the temporal dead zone
+// ("Cannot access 'brief' before initialization" — killed a whole batch at prompt 1).
+function brief(x) { return { group: x.group, id: x.id, title: x.title, w: x.w, si: x.si }; }
 
 // ---------------------------------------------------------------- login
 
-async function ensureLoggedIn() {
-  await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
-  await sleep(4000);
-  if (await isLoggedIn()) { log('✓ already signed in'); return; }
-
-  // Without a TTY there is nobody to answer the prompt — an agent or CI would hang here until
-  // it timed out, with a Chrome window open and no indication why. Fail fast and say exactly
-  // what to run instead. `--login` exists purely so that instruction is a single command.
-  if (!process.stdin.isTTY) {
-    const p = PROFILE_DIR !== defaultProfileDir() ? ` --profile "${PROFILE_DIR}"` : '';
-    log('');
-    console.error('✗ not signed in to Suno, and there is no terminal to sign in from.');
-    if (LOGIN_ONLY) {
-      // Already the login command — telling them to run the login command would be circular.
-      console.error('  --login needs a real terminal. Run it from a shell, or in Claude Code prefix');
-      console.error('  the line with "! " so it runs in your session:');
-      console.error('');
-      console.error(`    ! node "${process.argv[1]}" --login${p}`);
-    } else {
-      console.error('  Sign in once and the session persists in the profile. From a terminal:');
-      console.error('');
-      console.error(`    node "${process.argv[1]}" --login${p}`);
-    }
-    console.error('');
-    // Not a selector problem — diagnostics would be noise, and would litter the cwd.
-    throw Object.assign(new Error('sign-in required (no TTY)'), { skipDiagnostics: true });
-  }
-
-  log('');
-  log('  ── First run on this profile ──');
-  log('  A Chrome window is open. Sign in to Suno there, then press Enter here.');
-  log('  This is one-time: the session persists in the profile directory from now on.');
-  log('');
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  await new Promise(r => rl.question('  Press Enter once you are signed in… ', () => { rl.close(); r(); }));
-
-  await page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
-  await sleep(4000);
-  if (!(await isLoggedIn())) throw new Error('still not signed in to Suno — re-run once logged in');
-  log('✓ signed in');
-}
-
-async function isLoggedIn() {
-  try {
-    return await page.evaluate(async () => {
-      try { return !!(await window.Clerk?.session?.getToken()); } catch { return false; }
-    });
-  } catch { return false; }
-}
-
-/** Run an authenticated Suno API call from the page. The token never leaves the browser. */
-async function api(pathAndQuery, init = null) {
-  return page.evaluate(async ([p, i]) => {
-    const token = await window.Clerk.session.getToken();
-    const H = {
-      accept: '*/*', 'content-type': 'application/json', authorization: `Bearer ${token}`,
-      'browser-token': JSON.stringify({ token: btoa(JSON.stringify({ timestamp: Date.now() })) }),
-      'device-id': '00000000-0000-4000-8000-000000000001',
-      origin: 'https://suno.com', referer: 'https://suno.com/',
-    };
-    const r = await fetch('https://studio-api-prod.suno.com' + p, { ...(i || {}), headers: H });
-    if (!r.ok) return { __error: r.status, body: (await r.text()).slice(0, 200) };
-    const t = await r.text();
-    return t ? JSON.parse(t) : {};
-  }, [pathAndQuery, init]);
-}
+// Both live in lib/session.mjs; these wrappers keep the call sites below unchanged.
+// Hoisted `function`s, not `const` arrows: the top-level try block above runs before this line
+// is evaluated (same temporal-dead-zone trap that once killed a batch at prompt 1 via `brief`).
+function ensureLoggedIn() { return sessionEnsureLoggedIn(page, { profileDir: PROFILE_DIR, loginOnly: LOGIN_ONLY, log }); }
+function api(pathAndQuery, init = null) { return sessionApi(page, pathAndQuery, init); }
 
 // ---------------------------------------------------------------- workspace
 
