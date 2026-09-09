@@ -129,6 +129,22 @@ not). Both resolve to the same S3 object, so switching costs nothing in output.
 Caveat kept honest: server-side exemption vs. "also not counted" cannot be distinguished from the
 client; what is verifiable is that D is the documented-unlimited path and behaves as documented.
 
+### Update 2026-09-09 — the legacy route is now counted server-side
+
+While regression-testing v0.7.0's `--legacy-wav` flag (2 clips of `03 Night Air`):
+
+| Route | `downloads_used` before → after |
+|---|---|
+| Studio (`/api/studio/clip/{id}/download?format=wav`, 2 clips of `02 Lakeside Nocturne`) | **0 → 0** |
+| Legacy (`convert_wav` + `wav_file/`, 2 clips) | **0 → 2** |
+
+On 2026-09-04 the same legacy route had served 42 WAVs without moving the counter. Between the
+4th and the 9th Suno closed that gap — counting no longer depends on the client's
+`increment_action_count` report. The prediction in §4 held, and sooner than expected.
+
+Consequences: the Studio route is the only uncounted one; `--legacy-wav` is a counted fallback and
+the allowance guard on it is real. The two legacy test downloads cost 2 of the period's 60.
+
 ### Decision for `download.mjs` (v0.7.0)
 
 1. Replace `convert_wav` + `wav_file/` with `GET /api/studio/clip/{id}/download?format=wav`

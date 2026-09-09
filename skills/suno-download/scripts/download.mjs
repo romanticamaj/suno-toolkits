@@ -21,7 +21,12 @@
  *   3. wait until every selected clip is `complete` (--no-wait to skip)
  *   4. name files `{workspace} - {title}_{a|b}` (batch_index; created_at order as fallback)
  *   5. skip files already on disk that pass the size check — re-runs never re-download
- *   6. convert_wav + poll wav_file/ (≤5 in flight, 429 backoff)
+ *   6. resolve each WAV through the Suno Studio download endpoint
+ *      (GET /api/studio/clip/{id}/download?format=wav, polled to `ready`; ≤5 in flight, 429 backoff).
+ *      Since the 2026-09-03 download caps this is the documented-unlimited route for Premier +
+ *      Studio accounts and it does not touch `download_usage` (see docs/2026-09-suno-download-
+ *      limits.md). `--legacy-wav` keeps the old convert_wav + wav_file/ pair; accounts without
+ *      Studio access fall back to it automatically with a warning.
  *   7. stream each WAV to disk in Node (8 in flight), retrying with a FRESH signed URL
  *   8. verify RIFF header + size ≈ duration×192000+44 — a truncated download keeps a valid
  *      header and only shows up as a short file, so the header check alone is not enough
@@ -35,6 +40,8 @@
  *   --dry-run              resolve + list + show planned filenames; convert/download nothing
  *   --no-wait              do not wait for rendering clips; download what is complete
  *   --wait-timeout <min>   how long to wait for rendering clips (default 20)
+ *   --legacy-wav           use convert_wav + wav_file/ instead of the Studio download endpoint
+ *   --force                run even when the batch exceeds the remaining download allowance
  *   --login                sign in once for this profile, then exit
  *   --profile "<dir>"      override the Chrome profile directory
  *   --headless             headed is the default (same fingerprint reasoning as submit.mjs)
@@ -70,6 +77,8 @@ const ONLY = flag('only') ? String(flag('only')).split(',').map(s => s.trim()).f
 const DRY_RUN = has('dry-run');
 const NO_WAIT = has('no-wait');
 const WAIT_TIMEOUT_MS = Number(flag('wait-timeout', 20)) * 60 * 1000;
+const LEGACY_WAV = has('legacy-wav');
+const FORCE = has('force');
 const HEADLESS = has('headless');
 const PROFILE_DIR = path.resolve(String(flag('profile', defaultProfileDir())));
 
@@ -97,6 +106,8 @@ const { ctx, page } = await launchSession({ profileDir: PROFILE_DIR, headless: H
 const results = [];
 let failed = 0;
 let projectId = null, workspaceName = null;
+let wavPath_ = null;            // 'studio' | 'legacy' — decided in run() from the account's features
+let usageBefore = null, usageAfter = null;
 
 try {
   await ensureLoggedIn(page, { profileDir: PROFILE_DIR, loginOnly: IS_LOGIN, log });
@@ -110,7 +121,11 @@ try {
   console.error('\n✗ aborted: ' + (e && e.message || e));
   failed = failed || 1;
 } finally {
-  if (!IS_LOGIN && !DRY_RUN) writeResult();
+  if (!IS_LOGIN && !DRY_RUN) {
+    // Re-read the allowance so the result file shows whether this run was counted.
+    if (wavPath_) { try { usageAfter = (await api(page, '/api/billing/info/')).download_usage || null; } catch {} }
+    writeResult();
+  }
   await ctx.close();
 }
 process.exit(failed ? 1 : 0);
@@ -118,6 +133,22 @@ process.exit(failed ? 1 : 0);
 // ================================================================ steps
 
 async function run() {
+  // Which WAV route, and how much download allowance is left. Suno caps downloads per plan
+  // since 2026-09-03; the Studio endpoint is documented as unlimited for Premier and measured
+  // not to touch download_usage, so it is the default whenever the account has Studio access.
+  const bill = await api(page, '/api/billing/info/');
+  const features = new Set((bill.accessible_features || []).map(f => f.name));
+  const hasStudio = features.has('studio');
+  wavPath_ = LEGACY_WAV ? 'legacy' : hasStudio ? 'studio' : 'legacy';
+  usageBefore = bill.download_usage || null;
+  if (usageBefore) {
+    const u = usageBefore;
+    log(`Downloads : ${u.current_period_downloads_used}/${u.current_period_downloads_limit} used this period` +
+        (u.additional_download_remaining ? ` (+${u.additional_download_remaining} extra)` : ''));
+  }
+  log(`WAV route : ${wavPath_ === 'studio' ? 'Studio download endpoint (uncounted for Premier+Studio)' : 'legacy convert_wav + wav_file/'}`);
+  if (!LEGACY_WAV && !hasStudio) console.error('  ⚠ this account has no Studio access — falling back to the legacy WAV route');
+
   ({ id: projectId, name: workspaceName } = await resolveWorkspace(WORKSPACE_Q));
   log(`✓ workspace "${workspaceName}" (${projectId})`);
 
@@ -176,15 +207,31 @@ async function run() {
   if (skipped) log(`✓ ${skipped} already on disk and verified — skipped`);
   if (!todo.length) { log('✓ nothing to download'); return; }
 
-  // Fire conversions. 204 = queued (or already converted); anything else is reported per clip.
-  log(`▶ converting ${todo.length} clip(s) to WAV…`);
+  // Quota guard. The legacy route is counted server-side (measured 2026-09-09: 2 clips →
+  // downloads_used 0→2); a batch larger than the remaining allowance is refused there unless
+  // --force. The Studio route is documented unlimited and measured uncounted, so it only informs.
+  if (usageBefore && wavPath_ === 'legacy') {
+    const remaining = (usageBefore.current_period_downloads_limit - usageBefore.current_period_downloads_used) + (usageBefore.additional_download_remaining || 0);
+    if (todo.length > remaining && !FORCE) {
+      throw new Error(`${todo.length} clips to download but only ${remaining} download(s) left this period on the legacy route — use the Studio route, --only to pick takes, or --force`);
+    }
+  }
+
+  // Kick off conversions. Studio: the first poll on an unconverted clip starts the render
+  // server-side. Legacy: explicit convert_wav (204 = queued or already converted).
+  log(`▶ preparing ${todo.length} WAV(s) via ${wavPath_} route…`);
   await pool(todo, 5, async p => {
-    const r = await apiRetry(page, `/api/gen/${p.id}/convert_wav/`, { method: 'POST' });
-    if (r && r.__error) p.convertError = r.__error;
+    if (wavPath_ === 'studio') {
+      const r = await apiRetry(page, `/api/studio/clip/${p.id}/download?format=wav`);
+      if (r && r.__error && r.__error !== 429) p.convertError = r.__error;
+    } else {
+      const r = await apiRetry(page, `/api/gen/${p.id}/convert_wav/`, { method: 'POST' });
+      if (r && r.__error) p.convertError = r.__error;
+    }
   });
   const convFailed = todo.filter(p => p.convertError);
   if (convFailed.length) {
-    console.error(`  ✗ convert_wav refused ${convFailed.length} clip(s) (HTTP ${convFailed[0].convertError}) — WAV export needs a paid plan`);
+    console.error(`  ✗ ${convFailed.length} clip(s) refused (HTTP ${convFailed[0].convertError}) — WAV export needs a paid plan${wavPath_ === 'studio' ? '; try --legacy-wav' : ''}`);
   }
 
   // Download as each URL becomes ready, 8 in flight. A failed transfer retries with a FRESH
@@ -313,7 +360,32 @@ function fmtDur(s) { return s ? `${Math.floor(s / 60)}:${String(Math.round(s % 6
 
 // ---------------------------------------------------------------- wav
 
+/**
+ * Resolve a fresh signed WAV URL (1 h TTL) for a clip. Called right before each transfer and
+ * again on retry, never cached — a URL minted at the start of a long batch would be dead.
+ */
 async function waitWavUrl(id, timeoutMs = 4 * 60 * 1000) {
+  return wavPath_ === 'studio' ? waitWavUrlStudio(id, timeoutMs) : waitWavUrlLegacy(id, timeoutMs);
+}
+
+// Studio route: {ok, status:"processing"|"ready"|"error", download_url?, reason?, detail?}.
+// The endpoint renders the WAV itself on first request; "rate_limited" asks for a short backoff.
+async function waitWavUrlStudio(id, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const r = await apiRetry(page, `/api/studio/clip/${id}/download?format=wav`);
+    if (!r) { await sleep(3000); continue; }
+    if (r.__error) throw new Error(`studio download HTTP ${r.__error}${r.body ? ' ' + r.body.slice(0, 80) : ''}`);
+    if (r.reason === 'rate_limited') { await sleep(1000 + Math.random() * 1000); continue; }
+    if (r.status === 'ready' && r.download_url) return r.download_url;
+    if (r.status === 'error') throw new Error(`studio download failed: ${r.detail || r.message || 'unknown'}`);
+    await sleep(3000);
+  }
+  throw new Error('WAV render did not finish in time');
+}
+
+// Legacy route: wav_file/ answers 404 (or 200 {}) until convert_wav has produced the file.
+async function waitWavUrlLegacy(id, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const r = await apiRetry(page, `/api/gen/${id}/wav_file/`);
@@ -399,6 +471,8 @@ function writeResult() {
   const ok = results.filter(r => r.ok).length;
   const out = {
     workspace: workspaceName, projectId, outDir: OUT_DIR,
+    wavRoute: wavPath_,
+    downloadUsage: { before: usageBefore, after: usageAfter },
     selected: results.length, ok, skipped: results.filter(r => r.skipped).length, failed,
     at: new Date().toISOString(),
     clips: results,
@@ -407,6 +481,11 @@ function writeResult() {
   try { fs.writeFileSync(file, JSON.stringify(out, null, 2)); } catch {}
   log('');
   log(`${failed ? '✗' : '✓'} ${ok}/${results.length} on disk and verified`);
+  if (usageBefore && usageAfter) {
+    const d = usageAfter.current_period_downloads_used - usageBefore.current_period_downloads_used;
+    log(`  download allowance: ${usageAfter.current_period_downloads_used}/${usageAfter.current_period_downloads_limit} used` +
+        (d ? `  (this run counted ${d})` : '  (this run was not counted)'));
+  }
   if (failed) {
     for (const r of results.filter(r => !r.ok)) console.error(`   ✗ ${r.file}: ${r.error}`);
   }
