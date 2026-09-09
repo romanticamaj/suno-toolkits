@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.0.0
+version: 2.1.0
 ---
 
 # Suno Download
@@ -80,6 +80,17 @@ a partial run is resumed by launching the same command again.
 
 ## What the script guarantees
 
+- **Download caps are respected the sanctioned way.** Since 2026-09-03 Suno caps downloads per
+  plan (Free 7 lifetime · Pro 20/mo · Premier 60/mo) but exempts Suno Studio for Premier. The
+  script resolves WAVs through the Studio download endpoint
+  (`GET /api/studio/clip/{id}/download?format=wav`), which serves the same 48 kHz/16-bit file
+  and was measured not to touch `download_usage` (see `docs/2026-09-suno-download-limits.md`).
+  It prints the allowance before and after the run (`Downloads : used/limit` and
+  `this run was not counted`). Accounts without Studio access fall back to the legacy
+  `convert_wav` + `wav_file/` route with a warning — **that route is counted server-side**
+  (measured 2026-09-09: 2 clips → `downloads_used` 0 → 2), so there a batch larger than the
+  remaining allowance is refused unless `--force`; prefer `--only` to download just the chosen
+  takes. A longform's 60 takes would consume a Premier month on the legacy route.
 - **Sidecar = the clip object from `/api/project/{id}`.** Verified identical (41 keys) to what
   `/api/feed/` returns, so there is no second metadata round-trip.
 - **Filename** `{workspace} - {title}_{a|b}.wav` — the takes of a title ordered by
@@ -102,14 +113,15 @@ a partial run is resumed by launching the same command again.
 ## Options
 
 `--out <dir>` · `--only a,b` · `--dry-run` · `--no-wait` · `--wait-timeout <min>` (20) ·
-`--login` · `--profile "<dir>"` · `--headless` (headed is the default; same fingerprint reasoning
-as `submit.mjs`).
+`--legacy-wav` (old convert_wav route) · `--force` (ignore the allowance guard on the legacy
+route) · `--login` · `--profile "<dir>"` · `--headless` (headed is the default; same fingerprint
+reasoning as `submit.mjs`).
 
 ## Output
 
 `<dir>/{name}.wav` + `<dir>/{name}.json` per clip, and `<dir>/_download_result.json`:
-`{ workspace, projectId, outDir, selected, ok, skipped, failed, at, clips: [{ id, title,
-variant, file, duration, ok, size | error }] }`.
+`{ workspace, projectId, outDir, wavRoute: "studio"|"legacy", downloadUsage: { before, after },
+selected, ok, skipped, failed, at, clips: [{ id, title, variant, file, duration, ok, size | error }] }`.
 
 ## References
 
