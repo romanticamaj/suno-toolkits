@@ -340,11 +340,41 @@ async function readSaveToLabel() {
 
 // ---------------------------------------------------------------- form chrome
 
+/**
+ * Switch to the Advanced create form and PROVE it took.
+ *
+ * The click used to be fire-and-forget, which hid a real failure: the page can sit on
+ * `?mode=SIMPLE`, where the lyrics editor, the Exclude field and both sliders do not exist at
+ * all — so --doctor reported four unrelated "selector drift" failures instead of the one true
+ * cause. Verify by the fields the Advanced form owns, and fall back to driving the mode through
+ * the URL, which is how Suno itself switches tabs.
+ */
 async function ensureAdvancedTab() {
+  // Require BOTH fields: the Exclude input mounts a beat before the Lexical lyrics editor, so
+  // returning on Exclude alone hands the caller a form whose lyrics box does not exist yet.
+  const isAdvanced = async () => page.evaluate(() =>
+    !!document.querySelector('[aria-label="Lyrics editor"]') &&
+    [...document.querySelectorAll('textarea,input')].some(e => (e.placeholder || '').includes('Exclude styles')));
+
+  if (await isAdvanced()) return;
+
   const tab = page.getByRole('button', { name: 'Advanced', exact: true })
     .or(page.locator('button:has-text("Advanced")')).first();
-  if (await tab.count().catch(() => 0)) await tab.click().catch(() => {});
-  await sleep(1000);
+  if (await tab.count().catch(() => 0)) {
+    await tab.click().catch(() => {});
+    for (let i = 0; i < 10; i++) { if (await isAdvanced()) return; await sleep(500); }
+  }
+
+  // Fallback: the tab is reflected in the URL (?mode=SIMPLE vs the advanced mode).
+  for (const mode of ['CUSTOM', 'ADVANCED']) {
+    const url = new URL(page.url());
+    url.searchParams.set('mode', mode);
+    await page.goto(url.toString(), { waitUntil: 'domcontentloaded' }).catch(() => {});
+    for (let i = 0; i < 10; i++) { if (await isAdvanced()) return; await sleep(500); }
+  }
+
+  throw new Error(`could not switch to the Advanced create form — still at ${page.url()}. ` +
+    `The Simple tab has no lyrics editor, Exclude field or sliders, so nothing can be filled.`);
 }
 
 async function ensureModel(model) {

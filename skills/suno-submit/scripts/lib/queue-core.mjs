@@ -105,7 +105,7 @@ export function shortNames(queue) {
 /** First non-null model across the queue, mapped to the create form's dropdown label. */
 export function resolveModel(queue, fallback = 'v5.5') {
   const raw = queue.map(q => q.model).find(Boolean) || fallback;
-  const known = ['v5.5', 'v5', 'v4.5+', 'v4.5'];
+  const known = ['v6', 'v5.5', 'v5', 'v4.5+', 'v4.5'];
   if (known.includes(raw)) return { model: raw, warning: null };
   // v3 / v3.5 are no longer in Suno's dropdown
   return { model: fallback, warning: `model "${raw}" is not in Suno's dropdown — falling back to ${fallback}` };
