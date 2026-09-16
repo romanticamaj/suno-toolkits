@@ -110,14 +110,6 @@ let projectId = null, workspaceName = null;
 let wavPath_ = null;            // 'studio' | 'legacy' — decided in run() from the account's features
 let usageBefore = null, usageAfter = null;
 
-// Quota-tripwire state (logic in checkQuotaTripwire below). Declared HERE, not beside that
-// function: run() and the finally-block's writeResult() both execute before the helper section
-// further down is evaluated, so a `let` there sits in the temporal dead zone — the same trap that
-// has now bitten this repo four times (brief(), sanitize(), the session wrappers, and this).
-const TRIPWIRE_AFTER = [1, 5];  // re-read the allowance once the Nth file has landed
-const tripwireFired = new Set();
-let tripped = null;             // once set, every remaining worker bails out
-
 try {
   await ensureLoggedIn(page, { profileDir: PROFILE_DIR, loginOnly: IS_LOGIN, log });
   if (IS_LOGIN) {
@@ -262,7 +254,6 @@ async function run() {
   log(`▶ downloading (${todo.length} files, 8 in flight)…`);
   let n = 0;
   await pool(todo.filter(p => !p.convertError), 8, async p => {
-    if (tripped) { results.push({ ...brief(p), ok: false, skippedByTripwire: true, error: 'not attempted — quota tripwire' }); failed++; return; }
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -275,7 +266,6 @@ async function run() {
         n++;
         log(`  ✓ ${String(n).padStart(3)}/${todo.length}  ${MB(v.size).padStart(7)}  ${fmtDur(p.duration)}  ${p.file}`);
         results.push({ ...brief(p), ok: true, size: v.size, attempts: attempt });
-        await checkQuotaTripwire(n);
         return;
       } catch (e) {
         lastErr = e;
@@ -295,38 +285,6 @@ async function run() {
 
 function brief(p) {
   return { id: p.id, title: p.title, variant: p.variant, file: p.file + '.wav', duration: p.duration };
-}
-
-// ---------------------------------------------------------------- quota tripwire
-
-/**
- * The Studio route is uncounted TODAY. That is a measurement, not a promise: Suno closed the
- * legacy route's counting gap within five days of the caps starting. If the same happens to this
- * route mid-batch, learning it from the closing summary means the month is already gone — 60 clips
- * is a whole Premier period. So re-read the allowance right after the first files land, and stop
- * the moment it moves. Blast radius becomes the ~8 transfers already in flight instead of 60.
- *
- * Checked at two points because the counter may be eventually consistent: one file might not have
- * registered yet when the first check runs.
- *
- * State (TRIPWIRE_AFTER / tripwireFired / tripped) lives in the top block — see the note there.
- */
-async function checkQuotaTripwire(doneCount) {
-  if (tripped || FORCE || !usageBefore || wavPath_ !== 'studio') return;
-  if (!TRIPWIRE_AFTER.includes(doneCount) || tripwireFired.has(doneCount)) return;
-  tripwireFired.add(doneCount);
-
-  const bill = await apiRetry(page, '/api/billing/info/');
-  const now = bill && !bill.__error ? bill.download_usage : null;
-  if (!now) return;               // a transient read failure is not evidence of charging
-  const spent = now.current_period_downloads_used - usageBefore.current_period_downloads_used;
-  if (spent <= 0) return;
-
-  tripped = `the Studio route is being COUNTED — ${spent} download(s) charged after ${doneCount} file(s) ` +
-    `(now ${now.current_period_downloads_used}/${now.current_period_downloads_limit}). Stopping so the rest ` +
-    `of the batch does not spend the period's allowance. Re-check docs/2026-09-suno-download-limits.md; ` +
-    `--only lets you fetch just the takes you need, --force overrides this stop.`;
-  console.error(`\n✗ ${tripped}\n`);
 }
 
 // ---------------------------------------------------------------- workspace & clips
@@ -530,7 +488,6 @@ function writeResult() {
     workspace: workspaceName, projectId, outDir: OUT_DIR,
     wavRoute: wavPath_,
     downloadUsage: { before: usageBefore, after: usageAfter },
-    stoppedByQuotaTripwire: tripped || null,
     selected: results.length, ok, skipped: results.filter(r => r.skipped).length, failed,
     at: new Date().toISOString(),
     clips: results,
@@ -545,11 +502,7 @@ function writeResult() {
         (d ? `  (this run counted ${d})` : '  (this run was not counted)'));
   }
   if (failed) {
-    // One line for the tripwire's skips — listing 50 identical "not attempted" rows buries the
-    // real failures underneath them.
-    for (const r of results.filter(r => !r.ok && !r.skippedByTripwire)) console.error(`   ✗ ${r.file}: ${r.error}`);
-    const skipped = results.filter(r => r.skippedByTripwire).length;
-    if (skipped) console.error(`   ⏹ ${skipped} not attempted — stopped by the quota tripwire (re-run to resume what is safe)`);
+    for (const r of results.filter(r => !r.ok)) console.error(`   ✗ ${r.file}: ${r.error}`);
   }
   log(`  result → ${file}`);
 }
