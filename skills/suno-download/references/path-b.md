@@ -56,7 +56,55 @@ Show `# | title | duration | variant`. **Derive the variant by sorting same-titl
 that field disappears from the listing a day after the Create, so names built on it are not
 reproducible). Ask which to download unless the user said "all".
 
-### Step 5 — Convert + get WAV URLs
+### Step 5 — Get WAV URLs
+
+#### 5a. Preferred: the Studio endpoint (does NOT spend the allowance)
+
+This is what `download.mjs` uses and what the banner at the top tells you to reach for first. One
+GET per clip, polled until ready; it starts the render itself, so there is no separate
+`convert_wav` step. Use the legacy 5b below **only if this endpoint is what broke**.
+
+```js
+// STUDIO_WAV_URLS — replace CLIP_IDS_JSON with a JS array literal. Downloads a {clipId: url}
+// map as a file, because the tool channel blocks signed URLs.
+(async () => {
+  const token = await window.Clerk.session.getToken();
+  const H = { accept: '*/*', authorization: `Bearer ${token}`,
+    'browser-token': JSON.stringify({ token: btoa(JSON.stringify({ timestamp: Date.now() })) }),
+    'device-id': '00000000-0000-4000-8000-000000000001', origin: 'https://suno.com', referer: 'https://suno.com/' };
+  const API = 'https://studio-api-prod.suno.com';
+  const ids = CLIP_IDS_JSON;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  for (const id of ids) {
+    for (let i = 0; i < 40; i++) {                       // ~2 min per clip
+      const r = await fetch(`${API}/api/studio/clip/${id}/download?format=wav`, { headers: H });
+      if (!r.ok) { out[id] = `HTTP ${r.status}`; break; }
+      const j = await r.json();
+      if (j.reason === 'rate_limited') { await sleep(1000 + Math.random() * 1000); continue; }
+      if (j.status === 'ready' && j.download_url) { out[id] = j.download_url; break; }
+      if (j.status === 'error') { out[id] = `error: ${j.detail || j.message || 'unknown'}`; break; }
+      await sleep(3000);                                  // "processing"
+    }
+    if (!out[id]) out[id] = 'timed out';
+  }
+  const fname = '_suno_studio_wav_urls_' + Date.now() + '.json';
+  const blob = new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return { filename: fname, ready: Object.values(out).filter(v => v.startsWith('http')).length, total: ids.length };
+})()
+```
+
+Then download with `curl` and verify exactly as in Step 6 — the URL points at the same S3 object
+the legacy route returns, so everything downstream is identical.
+
+#### 5b. Legacy fallback: convert_wav + wav_file/ — **this one is counted**
+
+Each clip fetched this way spends one of the monthly allowance (see the banner). Re-read
+`download_usage` before and after, and fetch only the takes actually needed.
 
 Run **`CONVERT_AND_POLL`** with all selected IDs. ≤5 concurrent `studio-api` requests, 429 backoff, polls `wav_file/` every 5 s (4-minute ceiling).
 

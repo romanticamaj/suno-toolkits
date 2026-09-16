@@ -139,9 +139,19 @@ export function shortNames(queue) {
 }
 
 /** First non-null model across the queue, mapped to the create form's dropdown label. */
-export function resolveModel(queue, fallback = 'v5.5') {
+/**
+ * Which model the batch runs on.
+ *
+ * `known` is what Suno's dropdown ACTUALLY offers, read from the live menu on 2026-09-16:
+ * v6 · v6-wild · v6-mini, all `role=menuitemradio`. The v5.x and v4.5 line was retired when v6
+ * shipped — so every prompts.json still saying `"model": "v5.5"` (which is most of them) now asks
+ * for something unselectable. That falls through to the warning branch and runs on the fallback,
+ * which is the honest outcome; the alternative was the silent wrong-model batch this list existed
+ * to prevent. Re-read the menu and update this when Suno ships the next generation.
+ */
+export function resolveModel(queue, fallback = 'v6') {
   const raw = queue.map(q => q.model).find(Boolean) || fallback;
-  const known = ['v6', 'v5.5', 'v5', 'v4.5+', 'v4.5'];
+  const known = ['v6', 'v6-wild', 'v6-mini'];
 
   // The model is set ONCE on the form and applies to the whole batch — per-prompt `model` values
   // that disagree cannot be honoured, so say so rather than silently using whichever came first.

@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Suno Download
@@ -53,10 +53,17 @@ node "<skill>/scripts/download.mjs" "<workspace>" --out "<dir>"      # + --only 
 ```
 
 **Do not poll it** — checking progress every few seconds spends the turns this script exists to
-save; the notification is the signal. **Ending your turn IS how you wait**: say what you launched,
-then stop. The completion notification arrives as a new message and resumes you with full context.
-Do not invent an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks) — that
-burns turns and is exactly what the Bash tool's own guidance warns against.
+save. How you wait depends on whether anything can wake you back up:
+
+- **In the main conversation**, ending your turn IS how you wait. Say what you launched, then
+  stop; the completion notification arrives as a new message and resumes you with full context.
+  Do not invent an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks).
+- **As a subagent, nothing resumes you** — ending your turn ends the job, and the report never
+  gets written. Either run the script in the **foreground** with a generous `timeout` (10 min
+  covers a few clips; a whole workspace needs more), or launch it in the background and then make
+  **one** blocking call that waits for the result file, e.g.
+  `until [ -f "<dir>/_download_result.json" ]; do sleep 10; done`. One blocking call is not
+  polling; a stream of status checks is.
 
 Do not start a second run while one is in flight either: both would open the same Chrome profile
 and the second is refused (the profile is file-locked). `/suno-submit` shares that profile, so the
@@ -133,8 +140,10 @@ Beyond that, stop: re-verifying all of them by hand duplicates what the script j
 - **Rate-limit safe.** `studio-api` calls run 5-wide while the renders are kicked off and up to
   8-wide once the download pool is polling for its own URLs, all with 429 backoff; transfers run 8-wide
   against the CDN, which is a separate system.
-- **Never spends credits** — `convert_wav` renders an existing clip; nothing new is generated.
-  WAV export does need a paid plan (a `401/403` from `convert_wav` is reported per clip).
+- **Never spends generation credits** — downloading only re-renders an existing clip as WAV;
+  nothing new is generated. It can still consume the monthly **download allowance**, which is a
+  separate budget: on the Studio route it does not (measured), on `--legacy-wav` it does. WAV
+  export needs a paid plan (a `401/403` while preparing a clip is reported per clip).
 
 ## Options
 

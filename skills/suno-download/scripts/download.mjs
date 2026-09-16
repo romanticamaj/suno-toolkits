@@ -68,9 +68,20 @@ if (!IS_LOGIN && (!argv.length || argv[0].startsWith('--'))) {
   console.error('       node download.mjs --login          # one-time sign-in for this profile');
   process.exit(1);
 }
+// Third parser, same guard. submit.mjs and queue.mjs each got this separately; without it here,
+// `download.mjs "ws" --out` wrote into a folder literally named "true", and a trailing
+// `--wait-timeout` became NaN, which made `Date.now() < deadline` false and skipped the wait
+// entirely — silently downloading only whatever had already rendered.
+const VALUE_FLAGS = new Set(['out', 'only', 'profile', 'wait-timeout']);
 const flag = (name, def = null) => {
   const i = argv.indexOf('--' + name);
-  return i >= 0 ? (argv[i + 1] ?? true) : def;
+  if (i < 0) return def;
+  const v = argv[i + 1];
+  if (VALUE_FLAGS.has(name) && (v === undefined || v.startsWith('--'))) {
+    console.error(`✗ --${name} needs a value`);
+    process.exit(1);
+  }
+  return v ?? true;
 };
 const has = name => argv.includes('--' + name);
 
@@ -156,9 +167,14 @@ async function run() {
   // dangerous one, because a missing `accessible_features` looks exactly like "no Studio access"
   // (→ the counted legacy route) and a missing `download_usage` silently disables both the
   // allowance guard and the tripwire. Same consequence, so same refusal.
+  // Validate BOTH counters. With only `used` checked, a drifted `limit` made `remaining` NaN,
+  // `todo.length > NaN` false — so the legacy allowance guard passed silently — and the summary
+  // printed "NaN/NaN used".
   const shapeOk = bill && !bill.__error
     && Array.isArray(bill.accessible_features)
-    && bill.download_usage && typeof bill.download_usage.current_period_downloads_used === 'number';
+    && bill.download_usage
+    && typeof bill.download_usage.current_period_downloads_used === 'number'
+    && typeof bill.download_usage.current_period_downloads_limit === 'number';
   if (!shapeOk) {
     const why = !bill ? 'no response'
       : bill.__error ? `HTTP ${bill.__error}`
@@ -200,10 +216,22 @@ async function run() {
   if (pending().length && !NO_WAIT && !DRY_RUN) {
     log(`  ${pending().length} still rendering — waiting (up to ${WAIT_TIMEOUT_MS / 60000} min)…`);
     const deadline = Date.now() + WAIT_TIMEOUT_MS;
+    let consecutiveFailures = 0;
     while (pending().length && Date.now() < deadline) {
       await sleep(10000);
-      clips = await listClips(projectId);
-      selected = applyOnly(clips, ONLY);
+      // This is a poll over minutes, so a single transient failure is expected and must not abort
+      // the run — listClips throws by design, which is right for the ONE listing the plan is built
+      // from, but too harsh for ~120 repeats. Keep the last good list and try again; give up only
+      // if the API stays down.
+      try {
+        clips = await listClips(projectId);
+        selected = applyOnly(clips, ONLY);
+        consecutiveFailures = 0;
+      } catch (e) {
+        if (++consecutiveFailures >= 6) throw new Error(`the workspace listing has failed 6 times in a row while ` +
+          `waiting for renders — last error: ${e.message}`);
+        console.error(`  ⚠ listing hiccup (${consecutiveFailures}/6), retrying: ${e.message}`);
+      }
     }
     if (pending().length) console.error(`  ⚠ ${pending().length} clip(s) still not complete after timeout — they will be skipped`);
     else log('  ✓ all rendered');
