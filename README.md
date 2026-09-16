@@ -2,6 +2,10 @@
 
 A Claude Code plugin that automates [Suno AI](https://suno.com) — batch-submit prompts and download lossless WAV + full metadata. It drives a real logged-in Suno session, so there are no API keys and no anti-bot workarounds.
 
+**The design goal is to keep the model out of the loop.** Each skill is a single Node script that drives the browser itself and writes a result file; the model launches it and reads that file, instead of clicking through the UI turn by turn and re-sending the whole conversation on every step. A 36-prompt submit costs **~4 model turns instead of ~110**, a 60-clip download **~2 instead of ~25** — identical work, roughly a fifteenth of the tokens. A model-driven Claude in Chrome loop is kept as a documented fallback for the few cases the script refuses (audio references) or cannot handle, not as an equal option.
+
+Because the script, not the model, is the thing that breaks when Suno redesigns a form, **verify the environment before spending anything**: `--doctor` probes every selector in ~15 seconds and creates nothing, and `--dry-run` fills and verifies a whole batch without clicking Create.
+
 ## Skills
 
 | Skill | Does |
@@ -63,7 +67,9 @@ Suno has no public API; everything here calls its internal `studio-api` from a l
 
 Lossless audio is not sitting on a CDN: Suno renders the WAV on demand and hands back a short-lived signed S3 URL. The public `media_urls` are an encrypted opus stream for the web player. Since Suno's September 2026 download caps, `download.mjs` resolves WAVs through the **Suno Studio download endpoint** — the route Suno documents as unlimited for Premier + Studio, measured not to touch the account's `download_usage` — and falls back to the legacy `convert_wav` + `wav_file/` pair for accounts without Studio (with an allowance guard). The full investigation is in [`docs/2026-09-suno-download-limits.md`](docs/2026-09-suno-download-limits.md). Each WAV is streamed straight to disk and verified by size against the clip's duration and by the clip id Suno embeds in the file.
 
-Submitting still needs the real UI: the create form has no clean submit endpoint, the lyrics box is a Lexical contenteditable that only accepts a genuine paste, and the sliders are Radix components that only move on real arrow keys. `submit.mjs` performs exactly that sequence from one Node process. Either way the scripted path costs roughly a fifteenth of the model-driven one on a large batch — the work is identical, the model just is not in the loop for it.
+Submitting still needs the real UI: the create form has no clean submit endpoint, the lyrics box is a Lexical contenteditable that only accepts a genuine paste, and the sliders are Radix components that only move on real arrow keys. `submit.mjs` performs exactly that sequence from one Node process — which is what makes the token saving above possible even though the work is pure UI driving.
+
+Neither script needs `claude --chrome`. They open their own persistent Chrome profile (one-time `--login`), kept outside the repo because it holds real credentials, and separate from both your normal browsing and the Claude in Chrome extension — Chrome ignores `--remote-debugging-port` on the default profile, and a profile directory is file-locked, so a dedicated one is required rather than cosmetic.
 
 ## Develop
 
