@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.1.0
+version: 2.2.0
 ---
 
 # Suno Download
@@ -95,6 +95,13 @@ a partial run is resumed by launching the same command again.
   route — an unreadable response is indistinguishable from "no Studio access", and guessing wrong
   means silently spending the month's allowance. Re-run, or pass `--legacy-wav --force` to accept
   the counted route unguarded.
+- **A quota tripwire catches the rules changing mid-batch.** "Studio is uncounted" is a
+  measurement, not a promise — Suno closed the legacy route's gap within five days. So after the
+  1st and 5th file land, the script re-reads the allowance; if it moved, it **stops the rest of
+  the batch** (the ~8 transfers already in flight still finish) and says so, instead of letting
+  you find out from the closing summary with the month already gone. Everything downloaded stays
+  and verifies, so a re-run resumes. `--force` overrides the stop; `stoppedByQuotaTripwire` in the
+  result file records why.
 - **Sidecar = the clip object from `/api/project/{id}`.** Verified identical (41 keys) to what
   `/api/feed/` returns, so there is no second metadata round-trip.
 - **Filename** `{workspace} - {title}_{a|b}.wav` — the takes of a title ordered by
@@ -125,7 +132,8 @@ reasoning as `submit.mjs`).
 
 `<dir>/{name}.wav` + `<dir>/{name}.json` per clip, and `<dir>/_download_result.json`:
 `{ workspace, projectId, outDir, wavRoute: "studio"|"legacy", downloadUsage: { before, after },
-selected, ok, skipped, failed, at, clips: [{ id, title, variant, file, duration, ok, size | error }] }`.
+stoppedByQuotaTripwire, selected, ok, skipped, failed, at, clips: [{ id, title, variant, file,
+duration, ok, size | error, skippedByTripwire? }] }`.
 
 ## References
 
