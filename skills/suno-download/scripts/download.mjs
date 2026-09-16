@@ -41,7 +41,8 @@
  *   --no-wait              do not wait for rendering clips; download what is complete
  *   --wait-timeout <min>   how long to wait for rendering clips (default 20)
  *   --legacy-wav           use convert_wav + wav_file/ instead of the Studio download endpoint
- *   --force                run even when the batch exceeds the remaining download allowance
+ *   --force                run even when the batch exceeds the remaining download allowance, and
+ *                          (with --legacy-wav) even when the allowance cannot be read at all
  *   --login                sign in once for this profile, then exit
  *   --profile "<dir>"      override the Chrome profile directory
  *   --headless             headed is the default (same fingerprint reasoning as submit.mjs)
@@ -136,7 +137,21 @@ async function run() {
   // Which WAV route, and how much download allowance is left. Suno caps downloads per plan
   // since 2026-09-03; the Studio endpoint is documented as unlimited for Premier and measured
   // not to touch download_usage, so it is the default whenever the account has Studio access.
-  const bill = await api(page, '/api/billing/info/');
+  const bill = await apiRetry(page, '/api/billing/info/');
+  // Never GUESS this. A failed read used to leave accessible_features undefined, which looked
+  // exactly like "no Studio access" — so the script silently picked the COUNTED legacy route and,
+  // with download_usage also missing, skipped the allowance guard as well. A 60-clip batch would
+  // have spent a whole Premier month without a word. Unreadable billing = stop.
+  if (!bill || bill.__error) {
+    const why = bill ? `HTTP ${bill.__error}` : 'no response';
+    if (!(LEGACY_WAV && FORCE)) {
+      throw new Error(
+        `could not read /api/billing/info/ (${why}) — cannot tell which WAV route is safe or how much ` +
+        `download allowance is left. Re-run in a moment; to proceed anyway on the counted legacy ` +
+        `route, pass --legacy-wav --force explicitly.`);
+    }
+    console.error(`  ⚠ billing info unreadable (${why}) — proceeding on the legacy route unguarded, as forced`);
+  }
   const features = new Set((bill.accessible_features || []).map(f => f.name));
   const hasStudio = features.has('studio');
   wavPath_ = LEGACY_WAV ? 'legacy' : hasStudio ? 'studio' : 'legacy';

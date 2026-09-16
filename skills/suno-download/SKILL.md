@@ -91,6 +91,10 @@ a partial run is resumed by launching the same command again.
   (measured 2026-09-09: 2 clips → `downloads_used` 0 → 2), so there a batch larger than the
   remaining allowance is refused unless `--force`; prefer `--only` to download just the chosen
   takes. A longform's 60 takes would consume a Premier month on the legacy route.
+  If `/api/billing/info/` cannot be read at all the script **stops** rather than guessing the
+  route — an unreadable response is indistinguishable from "no Studio access", and guessing wrong
+  means silently spending the month's allowance. Re-run, or pass `--legacy-wav --force` to accept
+  the counted route unguarded.
 - **Sidecar = the clip object from `/api/project/{id}`.** Verified identical (41 keys) to what
   `/api/feed/` returns, so there is no second metadata round-trip.
 - **Filename** `{workspace} - {title}_{a|b}.wav` — the takes of a title ordered by
