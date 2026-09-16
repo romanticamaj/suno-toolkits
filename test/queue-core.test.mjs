@@ -76,10 +76,13 @@ test('buildQueue: explicit weirdness/style_influence are preserved, including 0-
   assert.equal(q[1].si, 80);
 });
 
-test('buildQueue: instrumental is strict-true only', () => {
+test('buildQueue: a declared instrumental flag is carried through as declared', () => {
   const q = episode();
   assert.equal(q[0].instrumental, true);
   assert.equal(q.find(x => x.id === '03').instrumental, false);
+  // (The undeclared → null case lives in the tri-state test further down. The old name here said
+  // "strict-true only", which described the coercion that turned "undeclared" into "meant to be
+  // sung" — the bug, not the behaviour.)
 });
 
 test('buildQueue: null lyrics become an empty string rather than the literal null', () => {
@@ -192,29 +195,36 @@ test('resolveModel: v6 is accepted', () => {
 });
 
 test('resolveModel: every shorthand currently in Suno\'s dropdown is accepted without warning', () => {
-  for (const m of ['v6', 'v5.5', 'v5', 'v4.5+', 'v4.5']) {
+  // Read off the live menu 2026-09-16. The v5.x / v4.5 line was retired when v6 shipped, so those
+  // now belong in the retired-model test below, not here.
+  for (const m of ['v6', 'v6-wild', 'v6-mini']) {
     assert.deepEqual(resolveModel([{ model: m }]), { model: m, warning: null }, `model ${m}`);
   }
 });
 
 test('resolveModel: an all-null queue uses the default, with no warning', () => {
-  assert.deepEqual(resolveModel([{ model: null }, { model: null }]), { model: 'v5.5', warning: null });
+  assert.deepEqual(resolveModel([{ model: null }, { model: null }]), { model: 'v6', warning: null });
 });
 
 test('resolveModel: the first non-null model in the queue wins', () => {
-  assert.equal(resolveModel([{ model: null }, { model: 'v5' }, { model: 'v6' }]).model, 'v5');
+  assert.equal(resolveModel([{ model: null }, { model: 'v6-mini' }, { model: 'v6' }]).model, 'v6-mini');
 });
 
 test('resolveModel: a retired model falls back AND warns — the fallback must never be silent', () => {
-  const r = resolveModel([{ model: 'v3.5' }]);
-  assert.equal(r.model, 'v5.5');
-  assert.match(r.warning, /v3\.5/);
-  assert.match(r.warning, /falling back to v5\.5/);
+  // v5.5 is the one that matters: it is what almost every existing prompts.json still asks for,
+  // and since v6 shipped it cannot be selected at all. Silence here would mean a whole batch
+  // generated on the wrong model, with the result file recording the one that was requested.
+  for (const retired of ['v5.5', 'v5', 'v4.5+', 'v4.5', 'v3.5']) {
+    const r = resolveModel([{ model: retired }]);
+    assert.equal(r.model, 'v6', `${retired} should fall back to v6`);
+    assert.ok(r.warning && r.warning.includes(retired), `warning should name ${retired}`);
+    assert.match(r.warning, /falling back to v6/);
+  }
 });
 
 test('resolveModel: an unknown future model warns rather than being passed through to the UI', () => {
   const r = resolveModel([{ model: 'v7' }]);
-  assert.equal(r.model, 'v5.5');
+  assert.equal(r.model, 'v6');
   assert.match(r.warning, /v7/);
 });
 
@@ -223,7 +233,7 @@ test('resolveModel: a caller-supplied fallback is honoured', () => {
 });
 
 test('resolveModel: an empty queue still yields a usable model', () => {
-  assert.deepEqual(resolveModel([]), { model: 'v5.5', warning: null });
+  assert.deepEqual(resolveModel([]), { model: 'v6', warning: null });
 });
 
 // ────────────────────────────────── copies, duplicates, tri-state (added 2026-09-16)

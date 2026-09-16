@@ -1,7 +1,7 @@
 ---
 name: suno-submit
 description: Batch-submit prompts.json files to Suno by running scripts/submit.mjs. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Do NOT drive the create form turn by turn - launch the script, which creates/switches the workspace and fills style, lyrics, exclude, title, model, Weirdness/Style Influence and vocal gender for every prompt in one process, then read _submit_result.json. It signs in through its own persistent Chrome profile (one-time --login), self-checks with --doctor, and dumps repair diagnostics when Suno's UI drifts. A model-driven Claude in Chrome loop remains as the documented fallback for audio references and for urgent batches when the script is broken. Supports an --only selector for a subset. Pairs with /suno-download to fetch the results.
-version: 1.6.0
+version: 1.7.0
 ---
 
 # Suno Submit
@@ -75,10 +75,17 @@ the Bash tool's ceiling. **Always `run_in_background: true`.** You will be notif
 node "<skill>/scripts/submit.mjs" "<path>"               # + --only <sel> if used in Step 1
 ```
 
-Do not poll it. **Ending your turn IS how you wait** — say what you launched, then stop. The
-completion notification arrives as a new message and resumes you with full context. Do not invent
-an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks): those spend the very
-turns the script exists to save, and they are what the Bash tool's own guidance warns against.
+Do not poll it. How you wait depends on whether anything can wake you back up:
+
+- **In the main conversation**, ending your turn IS how you wait — say what you launched, then
+  stop. The completion notification arrives as a new message and resumes you with full context.
+  Do not invent an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks):
+  those spend the very turns the script exists to save.
+- **As a subagent, nothing resumes you** — ending your turn ends the job and no report gets
+  written. Launch it in the background and then make **one** blocking call that waits for the
+  result file, e.g. `until [ -f "<prompts dir>/_submit_result.json" ]; do sleep 15; done`.
+  One blocking call is not polling; a stream of status checks is. (A submit batch runs ~16 s per
+  prompt, well past the Bash tool's foreground ceiling, so foreground is not an option here.)
 
 Do not start a second run while one is in flight — both would drive the same profile and Chrome
 will refuse the second (the profile is file-locked). `/suno-download` shares that profile.
@@ -176,7 +183,7 @@ The scripted runner writes lyrics to the **page** clipboard (`navigator.clipboar
 
 ### Output
 
-Writes `_submit_result.json` next to the prompts (workspace, model, per-prompt submitted/failed) and prints a one-line summary. Exit `0` only if every selected prompt was submitted **and** final verification found exactly 2 clips per title. Read that file rather than re-deriving what happened.
+Writes `_submit_result.json` next to the prompts (workspace, model, per-prompt submitted/failed) and prints a one-line summary. A `--dry-run` writes `_submit_result.dryrun.json` instead, so it cannot overwrite the record of the last real submit. Exit `0` only if every selected prompt was submitted **and** final verification found at least 2 clips per title. More than 2 is a double submit and fails — **except** on an `--only` re-run into an existing workspace, where Suno adds alongside the earlier takes, so 4 is expected and reported as information. Read that file rather than re-deriving what happened.
 
 ### When it stops
 

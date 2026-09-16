@@ -408,15 +408,39 @@ async function ensureModel(model) {
   if (shown === model) { log(`✓ model already ${model}`); return; }
   const sel = page.locator('button').filter({ hasText: /^v\d[\d.+]*$/ }).first();
   if (!(await sel.count().catch(() => 0))) {
-    console.error(`  ⚠ model selector not found — leaving as "${shown}" (wanted ${model})`);
-    return;
+    // Warning-and-continue here undid the point of the read-back below: `shown` is null by the
+    // same predicate that just failed, so the batch would generate on an unknown model.
+    throw new Error(`model selector not found (wanted ${model}) — refusing to submit, because the ` +
+      `whole batch would generate on whatever model the form happens to be showing.`);
   }
   await sel.click();
   await sleep(1200);
-  const opt = page.getByRole('menuitem', { name: model, exact: true })
-    .or(page.locator(`[role=option]:has-text("${model}")`))
-    .or(page.locator(`div:text-is("${model}")`)).first();
-  if (await opt.count().catch(() => 0)) await opt.click().catch(() => {});
+
+  // Match the LABEL, not the whole row. Suno's menu items are `role=menuitemradio` (not
+  // `menuitem`) and their text content is "v6-wildProBest for experimental ideas." — label, tier
+  // badge and description concatenated — so an exact-text match never fires and a "contains"
+  // match on "v6" would also hit v6-wild and v6-mini. Each row carries the bare label in a
+  // `.truncate` span; compare that.
+  const picked = await page.evaluate(m => {
+    const rows = [...document.querySelectorAll('[role=menuitemradio],[role=menuitem],[role=option]')];
+    for (const r of rows) {
+      const label = [...r.querySelectorAll('span')]
+        .map(s => (s.textContent || '').trim())
+        .find(t => /^v\d[\w.+-]*$/.test(t));
+      if (label === m) { r.click(); return label; }
+    }
+    return null;
+  }, model);
+
+  if (!picked) {
+    const offered = await page.evaluate(() => [...document.querySelectorAll('[role=menuitemradio],[role=menuitem],[role=option]')]
+      .map(r => [...r.querySelectorAll('span')].map(s => (s.textContent || '').trim()).find(t => /^v\d[\w.+-]*$/.test(t)))
+      .filter(Boolean));
+    await page.keyboard.press('Escape').catch(() => {});
+    throw new Error(`"${model}" is not in Suno's model menu. It offers: ${offered.join(', ') || '(none found)'}. ` +
+      `Update the model in prompts.json, and the known-model list in lib/queue-core.mjs.`);
+  }
+
   await page.keyboard.press('Escape').catch(() => {});
   await sleep(800);
 
@@ -574,27 +598,42 @@ async function setVocalGender(gender) {
   if (!gender) return;
   const want = gender.toLowerCase() === 'male' ? 'Male' : 'Female';
 
+  // Only ARIA/state attributes count as "selected". A className heuristic cannot: Suno is a
+  // Tailwind app where an *unselected* button still carries `bg-…`, so testing for that reported
+  // every button as already-on and the control was never clicked at all — worse than the blind
+  // click it replaced. When neither attribute exists, admit the state is unknown.
   const read = () => page.evaluate(() => {
     const out = {};
     for (const name of ['Male', 'Female']) {
       const b = [...document.querySelectorAll('button')].find(e => (e.textContent || '').trim() === name);
-      out[name] = b ? (b.getAttribute('aria-pressed') === 'true' || b.getAttribute('data-state') === 'on'
-        || /bg-|selected|active/.test(b.className || '')) : null;
+      if (!b) { out[name] = 'missing'; continue; }
+      const pressed = b.getAttribute('aria-pressed');
+      const state = b.getAttribute('data-state');
+      out[name] = pressed === 'true' || state === 'on' ? 'on'
+        : pressed === 'false' || state === 'off' ? 'off'
+        : 'unknown';
     }
     return out;
   });
 
   const before = await read();
-  if (before[want] === null) {
+  if (before[want] === 'missing') {
     console.error(`  ⚠ vocal gender "${want}" button not found — leaving unset`);
     return;
   }
-  if (before[want] === true) return;                 // already what we want; clicking could clear it
+  if (before[want] === 'on') return;                 // already set; clicking again could clear it
 
   await page.getByRole('button', { name: want, exact: true }).first().click().catch(() => {});
   await sleep(500);
+
   const after = await read();
-  if (after[want] !== true) console.error(`  ⚠ vocal gender "${want}" did not take — Suno will choose from the style`);
+  if (after[want] === 'off') {
+    console.error(`  ⚠ vocal gender "${want}" did not take — Suno will choose from the style instead`);
+  } else if (after[want] === 'unknown') {
+    // The control exposes no state we can read, so the click is best-effort. Say so once rather
+    // than claiming a success we cannot see.
+    console.error(`  ⚠ vocal gender "${want}" clicked, but the button exposes no aria-pressed/data-state — unverified`);
+  }
 }
 
 /**
@@ -656,9 +695,18 @@ async function clickCreate() {
 
 // ---------------------------------------------------------------- verification
 
+/**
+ * The workspace's clip count, or null if it could not be read.
+ *
+ * `?? 0` was the wrong default: a 200 whose shape had drifted (no `clip_count`) produced a
+ * baseline of 0, and since the per-Create check passes on `count >= baseline + 2`, a workspace
+ * already holding 40 clips then "confirmed" prompt 1 the instant it was polled — Create or no
+ * Create. An unreadable count must stay unreadable.
+ */
 async function clipCount(projectId) {
   const j = await api(`/api/project/${projectId}?page=1`);
-  return j.__error ? null : (j.clip_count ?? 0);
+  if (!j || j.__error) return null;
+  return typeof j.clip_count === 'number' ? j.clip_count : null;
 }
 
 /**
@@ -697,8 +745,16 @@ async function expectClipCount(projectId, want, timeoutMs = 90000) {
 async function finalVerify(projectId) {
   const seen = new Set(); const clips = [];
   for (let pg = 1; pg <= 40; pg++) {
-    const j = await api(`/api/project/${projectId}?page=${pg}`);
-    if (j.__error) break;
+    // A failed page must not end the listing: a short list reads as "these titles are missing
+    // clips", which points the user at an --only re-submit — a human-driven double charge.
+    const j = await apiRetry(`/api/project/${projectId}?page=${pg}`);
+    if (!j || j.__error) {
+      console.error(`⚠ could not finish listing the workspace (page ${pg}, ` +
+        `${j ? 'HTTP ' + j.__error : 'no response'}) — skipping the per-title check rather than ` +
+        `reporting clips as missing. Check the workspace in the browser before re-submitting anything.`);
+      failed++;
+      return;
+    }
     const got = (j.project_clips || []).map(pc => pc.clip).filter(Boolean);
     let added = 0;
     for (const c of got) if (!seen.has(c.id)) { seen.add(c.id); clips.push(c); added++; }
@@ -889,7 +945,10 @@ async function writeResult() {
     at: new Date().toISOString(),
     prompts: results,
   };
-  const file = path.join(outDir, '_submit_result.json');
+  // A dry run must not clobber the record of the last REAL submit — that file is how anyone later
+  // answers "what actually went out, and did it all land?", and it is gitignored, so overwriting
+  // it loses the answer for good.
+  const file = path.join(outDir, DRY_RUN ? '_submit_result.dryrun.json' : '_submit_result.json');
   fs.writeFileSync(file, JSON.stringify(out, null, 2));
   log('');
   log(`${failed ? '✗' : '✓'} ${out.submitted}/${items.length} submitted${DRY_RUN ? ' (dry run — nothing was created)' : ''}`);
