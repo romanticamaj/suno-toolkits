@@ -60,9 +60,6 @@ both would open the same Chrome profile and the second is refused (the profile i
 The script **waits for rendering clips** (up to 20 min, `--wait-timeout <min>` to change,
 `--no-wait` to download only what is complete). Launching it right after `/suno-submit` is fine.
 
-Do not start a second run while one is in flight — both would open the same Chrome profile and
-the second will refuse (the profile is file-locked). `/suno-submit` shares that profile too.
-
 ### Step 4 · Report from the result file
 
 Read `<dir>/_download_result.json`. Report `ok / selected`, and surface every entry with
