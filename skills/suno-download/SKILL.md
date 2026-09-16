@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.4.0
+version: 2.5.0
 ---
 
 # Suno Download
@@ -53,9 +53,14 @@ node "<skill>/scripts/download.mjs" "<workspace>" --out "<dir>"      # + --only 
 ```
 
 **Do not poll it** — checking progress every few seconds spends the turns this script exists to
-save; the notification is the signal. Do not start a second run while one is in flight either:
-both would open the same Chrome profile and the second is refused (the profile is file-locked).
-`/suno-submit` shares that profile, so the same applies across the two skills.
+save; the notification is the signal. **Ending your turn IS how you wait**: say what you launched,
+then stop. The completion notification arrives as a new message and resumes you with full context.
+Do not invent an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks) — that
+burns turns and is exactly what the Bash tool's own guidance warns against.
+
+Do not start a second run while one is in flight either: both would open the same Chrome profile
+and the second is refused (the profile is file-locked). `/suno-submit` shares that profile, so the
+same applies across the two skills.
 
 The script **waits for rendering clips** (up to 20 min, `--wait-timeout <min>` to change,
 `--no-wait` to download only what is complete). Launching it right after `/suno-submit` is fine.
@@ -68,6 +73,12 @@ tries). Exit `0` means **every selected clip is on disk and passed the size chec
 
 Re-running is safe and cheap: files already on disk that pass verification are **skipped**, so
 a partial run is resumed by launching the same command again.
+
+**How much to verify yourself:** the script already checks every file's size against its duration
+and its embedded clip id, and `_download_result.json` records the outcome per clip — so reading
+that file is normally the whole job. One independent spot-check of a single file (`ffprobe` for
+codec/duration, or the `RIFF` header) is worth it when the result matters or something looked odd.
+Beyond that, stop: re-verifying all of them by hand duplicates what the script just did.
 
 ### Notes on invocation
 
@@ -119,7 +130,8 @@ a partial run is resumed by launching the same command again.
   requires it to equal the clip being downloaded. Failures retry up to 3 times with a **fresh**
   signed URL (the old one may have expired). On a re-run, only files passing both checks are
   skipped.
-- **Rate-limit safe.** ≤5 concurrent `studio-api` calls with 429 backoff; downloads run 8-wide
+- **Rate-limit safe.** `studio-api` calls run 5-wide while the renders are kicked off and up to
+  8-wide once the download pool is polling for its own URLs, all with 429 backoff; transfers run 8-wide
   against the CDN, which is a separate system.
 - **Never spends credits** — `convert_wav` renders an existing clip; nothing new is generated.
   WAV export does need a paid plan (a `401/403` from `convert_wav` is reported per clip).

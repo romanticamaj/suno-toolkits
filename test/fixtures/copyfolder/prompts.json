@@ -1,0 +1,10 @@
+{
+  "project": "Fixture — a delivered project that also kept a copy in export/",
+  "short_name": "Camp",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    { "id": "01", "name": "Emberlight", "style": "ambient folk", "lyrics": null, "negative_tags": "NO vocals", "instrumental": true },
+    { "id": "02", "name": "StillWater", "style": "felt piano", "lyrics": null, "negative_tags": "NO vocals", "instrumental": true }
+  ]
+}

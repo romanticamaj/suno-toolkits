@@ -4,6 +4,30 @@
 Read this file only when the script is broken and a download is urgent, or when a step here is
 needed to diagnose it. Everything below was the original procedure and is kept verbatim.
 
+> ## ⚠ THIS PATH SPENDS THE MONTHLY DOWNLOAD ALLOWANCE
+>
+> This procedure uses `convert_wav` + `wav_file/` — the **legacy route**, which Suno began
+> **counting server-side on 2026-09-09** (measured: 2 clips moved `downloads_used` 0 → 2). Caps
+> are Free 7 lifetime · Pro 20/month · Premier 60/month, and **a longform project of 60 takes is
+> an entire Premier month.**
+>
+> `download.mjs` avoids this by using the Studio endpoint
+> (`GET /api/studio/clip/{id}/download?format=wav`), which is documented as unlimited for
+> Premier + Studio and measured not to move the counter. **Nothing in this file has that
+> protection** — no allowance guard, no mid-batch tripwire.
+>
+> So before running any of it by hand:
+>
+> 1. Read the allowance first — `GET /api/billing/info/` → `download_usage`
+>    (`current_period_downloads_used` / `current_period_downloads_limit`).
+> 2. **Prefer the Studio endpoint even here.** It is one GET, polled to `{status:"ready",
+>    download_url}`, and it renders the WAV itself — no separate `convert_wav` needed. Use the
+>    legacy steps below only if that endpoint is what broke.
+> 3. Download **only the takes actually needed** (the chosen ones in `order.txt`), never the whole
+>    workspace, and re-read the allowance as you go.
+>
+> Background and measurements: `docs/2026-09-suno-download-limits.md`.
+
 ## Prerequisites
 
 - Claude Code started with **`claude --chrome`**; the Claude extension installed in Chrome.
@@ -27,7 +51,10 @@ Run **`LIST_CLIPS`** with the `project_id`. Returns every clip with `id, title, 
 
 ### Step 4 — Confirm selection
 
-Show `# | title | duration | variant`; `batch_index` 0 → `_a`, 1 → `_b`. Ask which to download unless the user said "all".
+Show `# | title | duration | variant`. **Derive the variant by sorting same-title clips on
+`created_at` then `id`** — not from `batch_index` (see the naming note at the end of this file:
+that field disappears from the listing a day after the Create, so names built on it are not
+reproducible). Ask which to download unless the user said "all".
 
 ### Step 5 — Convert + get WAV URLs
 

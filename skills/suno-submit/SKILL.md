@@ -1,7 +1,7 @@
 ---
 name: suno-submit
 description: Batch-submit prompts.json files to Suno by running scripts/submit.mjs. Use when the user wants to submit Suno prompts, send prompts to Suno, batch-generate songs, run a prompts.json, re-submit or regenerate a single prompt, or invokes "/suno-submit". Do NOT drive the create form turn by turn - launch the script, which creates/switches the workspace and fills style, lyrics, exclude, title, model, Weirdness/Style Influence and vocal gender for every prompt in one process, then read _submit_result.json. It signs in through its own persistent Chrome profile (one-time --login), self-checks with --doctor, and dumps repair diagnostics when Suno's UI drifts. A model-driven Claude in Chrome loop remains as the documented fallback for audio references and for urgent batches when the script is broken. Supports an --only selector for a subset. Pairs with /suno-download to fetch the results.
-version: 1.5.0
+version: 1.6.0
 ---
 
 # Suno Submit
@@ -75,8 +75,13 @@ the Bash tool's ceiling. **Always `run_in_background: true`.** You will be notif
 node "<skill>/scripts/submit.mjs" "<path>"               # + --only <sel> if used in Step 1
 ```
 
-Do not poll it. Do not start a second run while one is in flight — both would drive the same
-profile and Chrome will refuse the second (the profile is file-locked).
+Do not poll it. **Ending your turn IS how you wait** — say what you launched, then stop. The
+completion notification arrives as a new message and resumes you with full context. Do not invent
+an "active wait" (`echo waiting`, a sleep loop, repeated `jobs`/`ls` checks): those spend the very
+turns the script exists to save, and they are what the Bash tool's own guidance warns against.
+
+Do not start a second run while one is in flight — both would drive the same profile and Chrome
+will refuse the second (the profile is file-locked). `/suno-download` shares that profile.
 
 ### Step 5 · Report from the result file
 

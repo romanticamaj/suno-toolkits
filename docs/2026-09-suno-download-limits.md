@@ -66,13 +66,16 @@ UI flow for a counted download: the Download menu opens `DOWNLOAD_RESTRICTIONS` 
 Related Studio endpoints: `POST /api/studio/create-or-load-project-for-clip/{clip_id}`,
 `GET /api/studio/clips/{clip_id}/projects`, `/api/studio/project/{project_id}`, …
 
-## 4. Where `download.mjs` stands
+## 4. Where `download.mjs` stood on 2026-09-04 — and why it moved
 
-- It runs path **A** and does **not** send `increment_action_count`. Consequence observed on
+> Superseded: since v0.7.0 the script uses path **D** (Studio). Kept because the reasoning below
+> is what drove that change, and the 09-09 measurement two sections down proves the prediction.
+
+- It ran path **A** and did **not** send `increment_action_count`. Consequence observed on
   2026-09-04: 42 WAVs fetched after the policy started, `downloads_used` still `0`, all 60 clips
   `is_download_unlocked: false`.
-- That is a gap in Suno's accounting, not an exemption. The migration gate on path B suggests
-  `wav_file/` will be retired; the tool must not depend on A.
+- That was a gap in Suno's accounting, not an exemption. The migration gate on path B suggested
+  `wav_file/` would be retired; the tool must not depend on A. **Five days later it was counted.**
 - A longform project = 30 prompts × 2 takes = **60 clips = the whole Premier month** if every
   take is counted. Under the new rules the economical workflow is *audition (streaming is
   unlimited) → pick takes → download only the chosen 30*.

@@ -19,10 +19,12 @@
  *   2. list every clip via /api/project/{id} — those clip objects ARE the sidecar metadata
  *      (verified identical to /api/feed/, so that extra round-trip is gone)
  *   3. wait until every selected clip is `complete` (--no-wait to skip)
- *   4. name files `{workspace} - {title}_{a|b}` (batch_index; created_at order as fallback)
+ *   4. name files `{workspace} - {title}_{a|b}` — takes ordered by (created_at, id), never by
+ *      batch_index, which Suno drops from the listing a day later
  *   5. skip files already on disk that pass the size check — re-runs never re-download
  *   6. resolve each WAV through the Suno Studio download endpoint
- *      (GET /api/studio/clip/{id}/download?format=wav, polled to `ready`; ≤5 in flight, 429 backoff).
+ *      (GET /api/studio/clip/{id}/download?format=wav, polled to `ready`; 5-wide while kicking the
+ *      renders off, then up to 8 as the download pool polls for its own URLs; 429 backoff throughout).
  *      Since the 2026-09-03 download caps this is the documented-unlimited route for Premier +
  *      Studio accounts and it does not touch `download_usage` (see docs/2026-09-suno-download-
  *      limits.md). `--legacy-wav` keeps the old convert_wav + wav_file/ pair; accounts without
@@ -150,8 +152,17 @@ async function run() {
   // exactly like "no Studio access" — so the script silently picked the COUNTED legacy route and,
   // with download_usage also missing, skipped the allowance guard as well. A 60-clip batch would
   // have spent a whole Premier month without a word. Unreadable billing = stop.
-  if (!bill || bill.__error) {
-    const why = bill ? `HTTP ${bill.__error}` : 'no response';
+  // Both halves matter. An HTTP error is the obvious case; a 200 whose SHAPE has drifted is the
+  // dangerous one, because a missing `accessible_features` looks exactly like "no Studio access"
+  // (→ the counted legacy route) and a missing `download_usage` silently disables both the
+  // allowance guard and the tripwire. Same consequence, so same refusal.
+  const shapeOk = bill && !bill.__error
+    && Array.isArray(bill.accessible_features)
+    && bill.download_usage && typeof bill.download_usage.current_period_downloads_used === 'number';
+  if (!shapeOk) {
+    const why = !bill ? 'no response'
+      : bill.__error ? `HTTP ${bill.__error}`
+      : `unexpected shape (accessible_features=${typeof bill.accessible_features}, download_usage=${typeof bill.download_usage})`;
     if (!(LEGACY_WAV && FORCE)) {
       throw new Error(
         `could not read /api/billing/info/ (${why}) — cannot tell which WAV route is safe or how much ` +
@@ -341,8 +352,13 @@ async function checkQuotaTripwire(doneCount) {
 async function resolveWorkspace(q) {
   const seen = new Set(); const all = [];
   for (let pg = 1; pg <= 20; pg++) {
-    const j = await api(page, `/api/project/me?page=${pg}&sort=created_at&show_trashed=false`);
-    if (j.__error) break;
+    // apiRetry, and a throw on failure: a 429 or 5xx used to surface as "no workspace matches",
+    // sending the user off to check a name that was never the problem.
+    const j = await apiRetry(page, `/api/project/me?page=${pg}&sort=created_at&show_trashed=false`);
+    if (!j || j.__error) {
+      throw new Error(`could not list workspaces (${j ? 'HTTP ' + j.__error : 'no response'}) — this is a ` +
+        `connection problem, not a wrong name.`);
+    }
     const projs = j.projects || [];
     let added = 0;
     for (const p of projs) if (!seen.has(p.id)) { seen.add(p.id); all.push(p); added++; }
@@ -350,6 +366,11 @@ async function resolveWorkspace(q) {
   }
   const exact = all.filter(p => p.name === q);
   if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    console.error(`✗ ${exact.length} workspaces are named exactly "${q}" — this script cannot tell them apart:`);
+    for (const h of exact) console.error(`   ${h.id}  (${h.clip_count} clips)`);
+    throw new Error('duplicate workspace name');
+  }
   const ql = q.toLowerCase();
   const hits = all.filter(p => (p.name || '').toLowerCase().includes(ql));
   if (hits.length === 1) return hits[0];
@@ -359,11 +380,22 @@ async function resolveWorkspace(q) {
   throw new Error('ambiguous workspace');
 }
 
+/**
+ * Every clip in the workspace.
+ *
+ * A failed page must THROW, not end the listing. Returning a short list quietly used to read as
+ * "that is all of them": the caller saw nothing pending, printed "all rendered", then "nothing to
+ * download", and exited 0 having fetched nothing — a silent no-op reported as success.
+ */
 async function listClips(pid) {
   const seen = new Set(); const clips = [];
   for (let pg = 1; pg <= 60; pg++) {
     const j = await apiRetry(page, `/api/project/${pid}?page=${pg}`);
-    if (!j || j.__error) break;
+    if (!j || j.__error) {
+      throw new Error(`listing the workspace failed on page ${pg} (${j ? 'HTTP ' + j.__error : 'no response'})` +
+        `${clips.length ? ` after ${clips.length} clip(s)` : ''} — stopping rather than treating a partial ` +
+        `list as the whole workspace.`);
+    }
     const got = (j.project_clips || []).map(pc => pc.clip).filter(Boolean);
     let added = 0;
     for (const c of got) if (!seen.has(c.id)) { seen.add(c.id); clips.push(c); added++; }
@@ -420,7 +452,13 @@ function planFiles(clips, ws) {
 }
 
 function wavPath(p) { return path.join(OUT_DIR, p.file + '.wav'); }
-function fmtDur(s) { return s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '  ?:??'; }
+// Round to whole seconds FIRST, then split. Doing it the other way lets 59.6s render as "2:60",
+// because the minutes were taken from the unrounded value.
+function fmtDur(s) {
+  if (!s) return '  ?:??';
+  const t = Math.round(s);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
 
 // ---------------------------------------------------------------- wav
 
@@ -460,8 +498,13 @@ async function waitWavUrlLegacy(id, timeoutMs) {
   throw new Error('WAV conversion did not finish in time');
 }
 
-async function streamToFile(url, dest) {
-  const res = await fetch(url);
+/**
+ * Stream one WAV to disk. The timeout is not optional: without it a stalled connection holds a
+ * pool slot forever, and a background run simply never returns — no error, no notification,
+ * nothing to act on. AbortSignal.timeout covers the whole transfer, headers and body.
+ */
+async function streamToFile(url, dest, timeoutMs = 10 * 60 * 1000) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok || !res.body) throw new Error(`download HTTP ${res.status}`);
   await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(dest));
 }

@@ -13,13 +13,28 @@ export function findPromptFiles(p) {
   const st = fs.statSync(p);
   if (st.isFile()) return [p];
   const out = [];
+  const skipped = [];
+  // Directories that hold COPIES, not new work. A delivery bundle (`export/`) or an archive keeps
+  // its own prompts.json so it stays self-contained; globbing it as a second group re-submits the
+  // whole episode — identical titles, double the credits, and the short_name consistency check
+  // cannot see it because the copy is consistent by definition.
+  const SKIP_DIR = /^(export|node_modules|\.git)$|^_/;
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.name === 'prompts.json') out.push(full);
+      if (e.isDirectory()) {
+        if (SKIP_DIR.test(e.name)) {
+          if (fs.existsSync(path.join(full, 'prompts.json'))) skipped.push(path.join(full, 'prompts.json'));
+          continue;
+        }
+        walk(full);
+      } else if (e.name === 'prompts.json') out.push(full);
     }
   })(p);
+  if (skipped.length) {
+    console.error(`⚠ ignored ${skipped.length} prompts.json in copy/archive folders (they would re-submit the same songs):`);
+    for (const f of skipped) console.error('   ' + f);
+  }
   return out;
 }
 
@@ -54,11 +69,28 @@ export function buildQueue(input) {
         w: pr.weirdness ?? 50,
         si: pr.style_influence ?? 50,
         model: pr.model || null,
-        instrumental: pr.instrumental === true,
+        // Tri-state on purpose: true = instrumental, false = a sung track, null = not declared.
+        // Collapsing absent to `false` would tell the pre-Create check "this one is meant to be
+        // sung", which is exactly the wrong default for a toolkit whose batches are mostly BGM.
+        instrumental: pr.instrumental ?? null,
         vocal_gender: pr.vocal_gender || null,
         audio_reference: pr.audio_reference || doc.audio_reference || null,
       });
     }
+  }
+
+  // Two prompts that compute the same title would create two identical pairs of songs. Whatever
+  // the cause — a stray copy the skip list missed, a duplicated id, a hand-edited name — it is
+  // always a double charge, so refuse rather than warn. A re-run of one prompt is unaffected:
+  // that queue holds a single entry for the title.
+  const byTitle = new Map();
+  for (const q of queue) byTitle.set(q.title, (byTitle.get(q.title) || 0) + 1);
+  const dupes = [...byTitle].filter(([, n]) => n > 1);
+  if (dupes.length) {
+    const lines = dupes.slice(0, 8).map(([t, n]) => `   ${t} ×${n}`).join('\n');
+    throw new Error(`${dupes.length} title(s) appear more than once in this queue — submitting would ` +
+      `create duplicate songs and charge twice:\n${lines}${dupes.length > 8 ? `\n   …and ${dupes.length - 8} more` : ''}\n` +
+      `Check for a copied prompts.json (an export/ or backup folder) or repeated ids.`);
   }
   return queue;
 }
@@ -110,7 +142,16 @@ export function shortNames(queue) {
 export function resolveModel(queue, fallback = 'v5.5') {
   const raw = queue.map(q => q.model).find(Boolean) || fallback;
   const known = ['v6', 'v5.5', 'v5', 'v4.5+', 'v4.5'];
-  if (known.includes(raw)) return { model: raw, warning: null };
+
+  // The model is set ONCE on the form and applies to the whole batch — per-prompt `model` values
+  // that disagree cannot be honoured, so say so rather than silently using whichever came first.
+  const distinct = [...new Set(queue.map(q => q.model).filter(Boolean))];
+  const mixed = distinct.length > 1
+    ? `prompts request different models (${distinct.join(', ')}) — the form takes one per batch, using "${raw}" for all of them; split the batch to use others`
+    : null;
+
+  if (known.includes(raw)) return { model: raw, warning: mixed };
   // v3 / v3.5 are no longer in Suno's dropdown
-  return { model: fallback, warning: `model "${raw}" is not in Suno's dropdown — falling back to ${fallback}` };
+  const unknown = `model "${raw}" is not in Suno's dropdown — falling back to ${fallback}`;
+  return { model: fallback, warning: mixed ? `${unknown}. Also: ${mixed}` : unknown };
 }

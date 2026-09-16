@@ -1,0 +1,10 @@
+{
+  "project": "Fixture — a sung track and an undeclared one",
+  "short_name": "Song",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    { "id": "01", "name": "Sung", "style": "indie pop", "lyrics": "[Verse]\nla la", "negative_tags": "", "instrumental": false },
+    { "id": "02", "name": "Undeclared", "style": "indie pop", "lyrics": "[Verse]\nla la", "negative_tags": "" }
+  ]
+}

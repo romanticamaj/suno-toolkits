@@ -225,3 +225,55 @@ test('resolveModel: a caller-supplied fallback is honoured', () => {
 test('resolveModel: an empty queue still yields a usable model', () => {
   assert.deepEqual(resolveModel([]), { model: 'v5.5', warning: null });
 });
+
+// ────────────────────────────────── copies, duplicates, tri-state (added 2026-09-16)
+//
+// Each of these covers a defect an audit found in the shipped code: a delivered project keeps a
+// copy of prompts.json inside export/, which the folder walk happily queued a second time —
+// identical titles, double the credits, and the short_name drift check cannot see it because a
+// copy is consistent with itself by definition.
+
+test('findPromptFiles: a prompts.json inside export/ is ignored, not queued again', () => {
+  const files = findPromptFiles(FIX('copyfolder'));
+  assert.equal(files.length, 1, 'only the project root copy should be queued');
+  assert.ok(!files[0].includes('export'), `export/ copy leaked into the queue: ${files[0]}`);
+});
+
+test('buildQueue: the export/ copy does not double the queue', () => {
+  const q = buildQueue(FIX('copyfolder'));
+  assert.equal(q.length, 2);
+  assert.deepEqual(q.map(x => x.title), ['Camp_Emberlight', 'Camp_StillWater']);
+});
+
+test('buildQueue: duplicate computed titles abort — they would charge twice', () => {
+  assert.throws(() => buildQueue(FIX('duptitle')), err => {
+    assert.match(err.message, /appear more than once/i);
+    assert.match(err.message, /Dup_SameName/);
+    return true;
+  });
+});
+
+test('buildQueue: instrumental stays tri-state — true / false / null when undeclared', () => {
+  const q = buildQueue(FIX('vocal'));
+  assert.equal(q[0].instrumental, false, 'an explicitly sung track must stay false');
+  assert.equal(q[1].instrumental, null, 'an undeclared prompt must not be coerced to false');
+  // Coercing null → false would tell the pre-Create check "this is meant to be sung" and let a
+  // mislabelled instrumental sprout vocals.
+  const inst = buildQueue(FIX('episode'));
+  assert.equal(inst[0].instrumental, true);
+});
+
+test('resolveModel: prompts asking for different models warn — the form takes one per batch', () => {
+  const { model, warning } = resolveModel(buildQueue(FIX('mixedmodel')));
+  assert.equal(model, 'v6', 'the first non-null model still wins');
+  assert.match(warning, /different models/i);
+  assert.match(warning, /v6/);
+  assert.match(warning, /v5\.5/);
+});
+
+test('resolveModel: agreeing prompts do not warn, and neither does an all-null queue', () => {
+  assert.equal(resolveModel([{ model: 'v6' }, { model: 'v6' }]).warning, null);
+  assert.equal(resolveModel([{ model: null }, { model: null }]).warning, null);
+  // One declared + one undeclared is not a disagreement — null means "no preference".
+  assert.equal(resolveModel([{ model: 'v6' }, { model: null }]).warning, null);
+});

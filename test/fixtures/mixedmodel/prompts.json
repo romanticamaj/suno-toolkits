@@ -1,0 +1,10 @@
+{
+  "project": "Fixture — prompts asking for different models",
+  "short_name": "Mixed",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    { "id": "01", "name": "One", "style": "a", "lyrics": null, "negative_tags": "", "instrumental": true, "model": "v6" },
+    { "id": "02", "name": "Two", "style": "b", "lyrics": null, "negative_tags": "", "instrumental": true, "model": "v5.5" }
+  ]
+}
