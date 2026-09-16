@@ -249,7 +249,7 @@ Selector tiers: `group:id` → exact `id` **in every group** → exact `name` �
    - The filtered queue keeps original order; groups with no surviving prompt are dropped.
 4. Determine **workspace name** (override → else auto-derived folder name).
 5. Pick the **model**: first non-null `model` across the *filtered* prompts, default `v5.5`. Map shorthand → dropdown label:
-   `v5.5`→`v5.5`, `v5`→`v5`, `v4.5+`→`v4.5+`, `v4.5`→`v4.5`. Older (`v3`,`v3.5`) aren't in the current dropdown — warn and fall back to `v5.5`.
+   `v6`→`v6`, `v5.5`→`v5.5`, `v5`→`v5`, `v4.5+`→`v4.5+`, `v4.5`→`v4.5`. Older (`v3`,`v3.5`) aren't in the current dropdown — warn and fall back to `v5.5`.
 6. Show the user a summary: workspace name, model, **how many prompts will submit** (and, if `--only` was used, which were selected vs. the full set), per-group count, and any prompt with non-default W/SI. If the batch is large, confirm before proceeding.
 
 ### Step 2 — Browser setup
@@ -466,7 +466,7 @@ Model: {model}   |  提交 {N} prompts → 預期 {N*2} 首
 - **Stale tag-chips** below the Styles box (small pills like `ethereal pan flute` from a prior session) are cosmetic and derived — `form_input` correctly replaces the textarea value, which is what's authoritative. Ignore leftover chips; don't try to clear them.
 - **Exclude field** wants bare tags. Strip leading `NO ` from items: `NO vocals, NO drums` → `vocals, drums`.
 - **Sliders**: focus via JS immediately before arrow keys; verify `aria-valuenow`; 1 keypress = 1%.
-- **Model dropdown** currently offers v5.5 / v5 / v4.5+ / v4.5. Set once in Step 4.
+- **Model dropdown** currently offers v6 / v5.5 / v5 / v4.5+ / v4.5. Set once in Step 4. A shorthand missing from `resolveModel`'s known list falls back to v5.5 **silently** — when Suno ships a new model, add it there first (verified 2026-09-15 for v6).
 - **Workspace routing** is sticky — set "Save to..." once; every Create goes there until changed.
 - **Audio reference (Cover) is sticky too** — once attached with a mode + Audio Influence, it stays through every Create until you remove it (trash icon) or change it. Attach once in Step 4.5, then loop. The **Audio Influence** slider only exists while an audio condition is attached, and it adds a third `[role=slider]` to the form — so **always address sliders by `aria-label`** (`Weirdness` / `Style Influence` / `Audio Influence`), never by positional index, since attaching audio changes the slider count.
 - **Slider input**: the JS-focus + arrow-key method (SET_SLIDERS) is the primary way for all sliders. If a slider ignores arrow keys, it was not focused — JS `.focus()` it first. As a last resort, `computer` `left_click_drag` along the track works (~1.5 px/1%); always verify `aria-valuenow` after.
