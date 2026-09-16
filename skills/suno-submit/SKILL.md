@@ -215,6 +215,6 @@ Suno's **`+ Voice`** ("Voices", Beta) feature — upload/record a voice so gener
   `ENSURE_WORKSPACE` / `VERIFY_SUBMISSIONS` JS blocks) **and the UI notes & gotchas** that
   `submit.mjs` encodes. Load it to run the fallback, or to repair the script from a
   `_submit_failure_*.json` dump. Fallback only — the script is the default.
-- `scripts/submit.mjs` · `scripts/queue.mjs` · `scripts/lib/session.mjs` (shared Chrome profile,
+- `scripts/submit.mjs` · `scripts/queue.mjs` · `<repo>/lib/session.mjs` (shared Chrome profile,
   login and `api()` — the same one `/suno-download` uses, so one `--login` serves both).
 - `/suno-download` — fetches the WAVs once Suno has rendered.

@@ -57,7 +57,7 @@ import { buildQueue, applyOnly, shortNames, resolveModel } from './lib/queue-cor
 import {
   defaultProfileDir, launchSession, sleep,
   ensureLoggedIn as sessionEnsureLoggedIn, api as sessionApi,
-} from './lib/session.mjs';
+} from '../../../lib/session.mjs';
 
 // ---------------------------------------------------------------- args
 

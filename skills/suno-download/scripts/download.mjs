@@ -10,7 +10,7 @@
  * This script runs the identical sequence in ONE process — the model launches it and reads
  * `_download_result.json`, nothing else.
  *
- * It shares the persistent Chrome profile with submit.mjs (see lib/session.mjs), so one
+ * It shares the persistent Chrome profile with submit.mjs (see ../../../lib/session.mjs), so one
  * `--login` serves both. No API key, no exported cookies, no password.
  *
  * WHAT IT DOES
@@ -55,7 +55,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import {
   defaultProfileDir, launchSession, ensureLoggedIn, api, apiRetry, pool, sleep,
-} from '../../suno-submit/scripts/lib/session.mjs';
+} from '../../../lib/session.mjs';
 
 // ---------------------------------------------------------------- args
 
