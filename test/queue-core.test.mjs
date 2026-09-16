@@ -277,3 +277,50 @@ test('resolveModel: agreeing prompts do not warn, and neither does an all-null q
   // One declared + one undeclared is not a disagreement — null means "no preference".
   assert.equal(resolveModel([{ model: 'v6' }, { model: null }]).warning, null);
 });
+
+// ──────────────────────────────────────────── queue.mjs CLI guards (added 2026-09-16)
+//
+// queue.mjs parses --only itself instead of sharing submit.mjs's argument guard, so a fix applied
+// to one parser silently left the other open: `… list --only` with no value produced an empty
+// selector list, which applyOnly reads as "no filter", and the whole queue printed as though the
+// filter had been honoured. Two parsers, two tests.
+
+import { execFileSync } from 'node:child_process';
+
+const QUEUE_CLI = path.join(HERE, '..', 'skills', 'suno-submit', 'scripts', 'queue.mjs');
+
+/** Run queue.mjs and return { status, stdout, stderr } without throwing on a non-zero exit. */
+function runQueue(args) {
+  try {
+    const stdout = execFileSync(process.execPath, [QUEUE_CLI, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return { status: 0, stdout, stderr: '' };
+  } catch (e) {
+    return { status: e.status ?? 1, stdout: e.stdout || '', stderr: e.stderr || '' };
+  }
+}
+
+test('queue.mjs: a trailing --only with no value fails instead of listing everything', () => {
+  const r = runQueue([FIX('episode'), 'list', '--only']);
+  assert.equal(r.status, 1, `expected exit 1, got ${r.status}. stdout was:\n${r.stdout}`);
+  assert.match(r.stderr, /--only needs a value/);
+  assert.doesNotMatch(r.stdout, /TOTAL=/, 'it must not print a queue when the filter was rejected');
+});
+
+test('queue.mjs: --only followed by another flag is rejected, not swallowed', () => {
+  const r = runQueue([FIX('episode'), 'list', '--only', '--clip']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--only needs a value/);
+});
+
+test('queue.mjs: a real --only value still filters normally', () => {
+  const r = runQueue([FIX('episode'), 'list', '--only', '01']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /TOTAL=2/);   // id 01 exists in both BGM folders
+});
+
+test('queue.mjs: a duplicate-title queue exits 1 with a one-line error, not a stack trace', () => {
+  const r = runQueue([FIX('duptitle'), 'list']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /appear more than once/);
+  assert.doesNotMatch(r.stderr, /at Object\.|at Module\./, 'an uncaught throw buries the message under a stack trace');
+});
