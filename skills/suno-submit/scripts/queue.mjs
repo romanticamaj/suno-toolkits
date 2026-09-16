@@ -31,10 +31,32 @@ if (!argv.length) {
 const INPUT = argv[0];
 const CMD = argv[1] || 'list';
 const WANT_CLIP = argv.includes('--clip');
+// `--only` with nothing after it must fail, not quietly select everything. Left alone it yields
+// an empty selector list, which applyOnly treats as "no filter" — so `… list --only` printed the
+// whole queue as if the filter had been honoured. submit.mjs guards this; queue.mjs parses the
+// flag separately and did not, so the guard has to exist in both places.
 const onlyIx = argv.indexOf('--only');
-const ONLY = onlyIx >= 0 ? (argv[onlyIx + 1] || '').split(',').map(s => s.trim()).filter(Boolean) : null;
+const onlyRaw = onlyIx >= 0 ? argv[onlyIx + 1] : null;
+if (onlyIx >= 0 && (onlyRaw === undefined || onlyRaw.startsWith('--'))) {
+  console.error('✗ --only needs a value, e.g. --only 01,03 (leaving it empty would list everything)');
+  process.exit(1);
+}
+const ONLY = onlyIx >= 0 ? onlyRaw.split(',').map(s => s.trim()).filter(Boolean) : null;
+if (ONLY && !ONLY.length) {
+  console.error('✗ --only was given but selects nothing — check the value');
+  process.exit(1);
+}
 
-const queue = buildQueue(INPUT);
+// buildQueue throws on a duplicate title (a double charge waiting to happen). Surface that as a
+// one-line error like every other failure here; an uncaught throw dumps a stack trace and buries
+// the message that actually tells the user what to do.
+let queue;
+try {
+  queue = buildQueue(INPUT);
+} catch (e) {
+  console.error('✗ ' + e.message);
+  process.exit(1);
+}
 
 let items;
 try {
