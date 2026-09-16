@@ -1,6 +1,6 @@
 {
   "name": "suno-toolkits",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Automate Suno AI — batch-submit prompts and download lossless WAV + full metadata.",

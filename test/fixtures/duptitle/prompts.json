@@ -1,0 +1,10 @@
+{
+  "project": "Fixture — two prompts that compute the same title",
+  "short_name": "Dup",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    { "id": "01", "name": "SameName", "style": "a", "lyrics": null, "negative_tags": "", "instrumental": true },
+    { "id": "02", "name": "SameName", "style": "b", "lyrics": null, "negative_tags": "", "instrumental": true }
+  ]
+}

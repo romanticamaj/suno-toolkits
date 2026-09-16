@@ -39,7 +39,8 @@
  *   --only 01,BGM02:03     submit a subset (same selector rules as queue.mjs)
  *   --workspace "<name>"   override the auto-derived workspace name
  *   --profile "<dir>"      override the Chrome profile directory
- *   --headed / --headless  default is headed; headless trips bot detection and breaks clipboard
+ *   --headless             headed is the default (headless trips bot detection and breaks the
+ *                          clipboard paste the lyrics editor needs); there is no --headed flag
  *   --gap-same <sec>       pacing within one prompts.json group (default 8)
  *   --gap-group <sec>      pacing when crossing to the next group (default 30)
  *   --slowmo <ms>          Playwright slowMo, for watching it work
@@ -56,7 +57,7 @@ import path from 'node:path';
 import { buildQueue, applyOnly, shortNames, resolveModel } from './lib/queue-core.mjs';
 import {
   defaultProfileDir, launchSession, sleep,
-  ensureLoggedIn as sessionEnsureLoggedIn, api as sessionApi,
+  ensureLoggedIn as sessionEnsureLoggedIn, api as sessionApi, apiRetry as sessionApiRetry,
 } from '../../../lib/session.mjs';
 
 // ---------------------------------------------------------------- args
@@ -70,9 +71,18 @@ if (!IS_LOGIN && (!argv.length || argv[0].startsWith('--'))) {
   console.error('       node submit.mjs --login          # one-time sign-in for this profile');
   process.exit(1);
 }
+// A value-taking flag given last (`… --only`) used to yield boolean true, which then became the
+// string "true" — path.resolve("true") or a filter on a prompt named "true". Fail loudly instead.
+const VALUE_FLAGS = new Set(['only', 'workspace', 'profile', 'gap-same', 'gap-group', 'slowmo']);
 const flag = (name, def = null) => {
   const i = argv.indexOf('--' + name);
-  return i >= 0 ? (argv[i + 1] ?? true) : def;
+  if (i < 0) return def;
+  const v = argv[i + 1];
+  if (VALUE_FLAGS.has(name) && (v === undefined || v.startsWith('--'))) {
+    console.error(`✗ --${name} needs a value`);
+    process.exit(1);
+  }
+  return v ?? true;
 };
 const has = name => argv.includes('--' + name);
 
@@ -195,7 +205,7 @@ async function run() {
   log(`✓ form ready (sliders at W=${cur.w} SI=${cur.si})\n`);
 
   let lastGroup = null;
-  let baseline = await clipCount(projectId);
+  let baseline = await requireClipCount(projectId, 'baseline before the first Create');
 
   for (const [n, item] of items.entries()) {
     if (lastGroup !== null && item.group !== lastGroup) await sleep(GAP_GROUP);
@@ -261,20 +271,33 @@ function brief(x) { return { group: x.group, id: x.id, title: x.title, w: x.w, s
 // is evaluated (same temporal-dead-zone trap that once killed a batch at prompt 1 via `brief`).
 function ensureLoggedIn() { return sessionEnsureLoggedIn(page, { profileDir: PROFILE_DIR, loginOnly: LOGIN_ONLY, log }); }
 function api(pathAndQuery, init = null) { return sessionApi(page, pathAndQuery, init); }
+function apiRetry(pathAndQuery, init = null) { return sessionApiRetry(page, pathAndQuery, init); }
 
 // ---------------------------------------------------------------- workspace
 
 async function ensureWorkspace(name) {
   const seen = new Set(); const all = [];
+  // A FAILED listing must never reach the create call below: "I could not read your workspaces"
+  // and "you have no workspace by that name" are different facts, and conflating them creates a
+  // SECOND workspace with the same name. The batch then files into the duplicate, and a later
+  // /suno-download reports the name as ambiguous. Retry, then refuse.
   for (let pg = 1; pg <= 20; pg++) {
-    const j = await api(`/api/project/me?page=${pg}&sort=created_at&show_trashed=false`);
-    if (j.__error) break;
+    const j = await apiRetry(`/api/project/me?page=${pg}&sort=created_at&show_trashed=false`);
+    if (!j || j.__error) {
+      throw new Error(`could not list workspaces (${j ? 'HTTP ' + j.__error : 'no response'}) — refusing to ` +
+        `continue, because creating "${name}" now could duplicate an existing workspace of that name.`);
+    }
     const projs = j.projects || [];
     let added = 0;
     for (const p of projs) if (!seen.has(p.id)) { seen.add(p.id); all.push(p); added++; }
     if (!projs.length || !added || all.length >= (j.num_total_results || 0)) break;
   }
-  const hit = all.find(p => p.name === name);
+  const matches = all.filter(p => p.name === name);
+  if (matches.length > 1) {
+    throw new Error(`${matches.length} workspaces are already named "${name}" — submitting would add to an ` +
+      `arbitrary one and /suno-download could not tell them apart. Rename or trash the extras first.`);
+  }
+  const hit = matches[0];
   if (hit) return hit.id;
 
   const created = await api('/api/project', {
@@ -396,6 +419,19 @@ async function ensureModel(model) {
   if (await opt.count().catch(() => 0)) await opt.click().catch(() => {});
   await page.keyboard.press('Escape').catch(() => {});
   await sleep(800);
+
+  // Read it back. Clicking an option that was not there used to pass silently, and the whole batch
+  // would generate on whatever model the form happened to be showing — 72 songs on the wrong model,
+  // with the result file recording the one we asked for.
+  const after = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find(e => /^v\d/.test((e.textContent || '').trim()));
+    return b ? (b.textContent || '').trim() : null;
+  });
+  if (after !== model) {
+    throw new Error(`model is "${after}", expected "${model}" — the dropdown did not take. ` +
+      `Submitting now would generate the whole batch on the wrong model.`);
+  }
+  log(`✓ model set to ${model}`);
 }
 
 async function ensureMoreOptions() {
@@ -450,7 +486,30 @@ async function fillTextFields(item) {
  * scrolls, and a coordinate that was right for prompt 1 pastes the whole lyric into Styles later.
  */
 async function fillLyrics(item) {
-  await page.evaluate(t => navigator.clipboard.writeText(t), item.lyrics);
+  const text = item.lyrics || '';
+
+  // Empty lyrics need an explicit clear, not a paste of "". Ctrl+A followed by pasting nothing can
+  // leave the previous prompt's lyrics sitting in the editor — and verifyForm skips its lyric
+  // checks when the prompt has none, so that leftover would sail through and be sung.
+  if (!text.trim()) {
+    const cleared = await page.evaluate(() => {
+      const el = document.querySelector('[aria-label="Lyrics editor"]');
+      if (!el) return null;
+      el.focus();
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const s = window.getSelection();
+      s.removeAllRanges(); s.addRange(r);
+      document.execCommand('delete');
+      return el.innerText.trim();
+    });
+    if (cleared === null) throw new Error('could not focus the lyrics editor');
+    if (cleared !== '') throw new Error(`lyrics editor still holds text after clearing: "${cleared.slice(0, 40)}…"`);
+    await sleep(400);
+    return;
+  }
+
+  await page.evaluate(t => navigator.clipboard.writeText(t), text);
   const focused = await page.evaluate(() => {
     const el = document.querySelector('[aria-label="Lyrics editor"]');
     if (!el) return null;
@@ -504,17 +563,38 @@ async function setSliders(targetW, targetSI, cur) {
   return now;
 }
 
-/** Sticky Male/Female toggle in More Options — only touch it when it needs to change. */
+/**
+ * Sticky Male/Female toggle in More Options.
+ *
+ * Read before clicking, and read back after. Blind-clicking is wrong twice over: if the control
+ * toggles off when you click the option that is already active, a run of same-gender prompts
+ * alternates between set and unset; and a click that does not register is invisible.
+ */
 async function setVocalGender(gender) {
   if (!gender) return;
   const want = gender.toLowerCase() === 'male' ? 'Male' : 'Female';
-  const btn = page.getByRole('button', { name: want, exact: true }).first();
-  if (!(await btn.count().catch(() => 0))) {
+
+  const read = () => page.evaluate(() => {
+    const out = {};
+    for (const name of ['Male', 'Female']) {
+      const b = [...document.querySelectorAll('button')].find(e => (e.textContent || '').trim() === name);
+      out[name] = b ? (b.getAttribute('aria-pressed') === 'true' || b.getAttribute('data-state') === 'on'
+        || /bg-|selected|active/.test(b.className || '')) : null;
+    }
+    return out;
+  });
+
+  const before = await read();
+  if (before[want] === null) {
     console.error(`  ⚠ vocal gender "${want}" button not found — leaving unset`);
     return;
   }
-  await btn.click().catch(() => {});
-  await sleep(400);
+  if (before[want] === true) return;                 // already what we want; clicking could clear it
+
+  await page.getByRole('button', { name: want, exact: true }).first().click().catch(() => {});
+  await sleep(500);
+  const after = await read();
+  if (after[want] !== true) console.error(`  ⚠ vocal gender "${want}" did not take — Suno will choose from the style`);
 }
 
 /**
@@ -551,7 +631,15 @@ async function verifyForm(item, cur) {
     if (st.paras < want) problems.push(`lyrics has ${st.paras} paragraphs, expected >= ${want}`);
     if (!st.endsWithEnd && item.lyrics.trim().endsWith('[End]')) problems.push('lyrics does not end with [End]');
   }
-  if (st.hasVocalTags) problems.push('lyrics contains [Verse]/[Chorus] — will trigger vocals');
+  // Only a problem for an INSTRUMENTAL prompt. This check used to fire unconditionally, which made
+  // every vocal song unsubmittable: `[Verse]`/`[Chorus]` is exactly what a sung track's lyrics look
+  // like, so each one failed pre-Create verification and was skipped. `instrumental` defaults to
+  // true here because this toolkit's batches are overwhelmingly BGM, and silently letting a
+  // mislabelled instrumental sprout vocals is the more expensive mistake of the two.
+  if (st.hasVocalTags && item.instrumental !== false) {
+    problems.push('lyrics contains [Verse]/[Chorus] — will trigger vocals on an instrumental prompt ' +
+      '(set "instrumental": false in prompts.json if this track is meant to be sung)');
+  }
   if (st.w !== item.w) problems.push(`Weirdness is ${st.w}, expected ${item.w}`);
   if (st.si !== item.si) problems.push(`Style Influence is ${st.si}, expected ${item.si}`);
 
@@ -571,6 +659,22 @@ async function clickCreate() {
 async function clipCount(projectId) {
   const j = await api(`/api/project/${projectId}?page=1`);
   return j.__error ? null : (j.clip_count ?? 0);
+}
+
+/**
+ * The baseline the per-Create check counts up from. It must be a NUMBER: `clipCount` returns null
+ * on an API error, and `null + 2` is 2 in JavaScript — so a failed first read used to set the
+ * target to 2, and any workspace already holding two clips "confirmed" prompt 1 instantly, whether
+ * or not Create had actually landed. Retry, and refuse to start rather than guess.
+ */
+async function requireClipCount(projectId, what) {
+  for (let i = 0; i < 3; i++) {
+    const n = await clipCount(projectId);
+    if (typeof n === 'number') return n;
+    await sleep(2000 * (i + 1));
+  }
+  throw new Error(`could not read the workspace clip count (${what}) — refusing to submit, because ` +
+    `the per-Create "+2 clips" check would otherwise pass against a wrong baseline.`);
 }
 
 /**
@@ -604,18 +708,28 @@ async function finalVerify(projectId) {
   for (const c of clips) byTitle[c.title || '(untitled)'] = (byTitle[c.title || '(untitled)'] || 0) + 1;
 
   const submitted = results.filter(r => r.submitted === true);
-  const wrong = submitted.filter(r => byTitle[r.title] !== 2)
-    .map(r => `${r.title}=${byTitle[r.title] ?? 0}`);
+  // A title with MORE than 2 clips means a double submit — except on an `--only` re-run into an
+  // existing workspace, where Suno adds alongside what is already there, so 4 is the documented
+  // and expected outcome. Treating that as a failure made the documented resume path exit 1.
+  const short = submitted.filter(r => (byTitle[r.title] ?? 0) < 2).map(r => `${r.title}=${byTitle[r.title] ?? 0}`);
+  const over = submitted.filter(r => (byTitle[r.title] ?? 0) > 2).map(r => `${r.title}=${byTitle[r.title]}`);
 
   log('');
   log(`Verification: ${clips.length} clips in the workspace, ${Object.keys(byTitle).length} distinct titles`);
-  if (wrong.length) {
-    console.error('⚠ these titles do not have exactly 2 clips (4 = double submit, 0/1 = still settling):');
-    for (const w of wrong) console.error('   ' + w);
+  if (short.length) {
+    console.error('⚠ these titles have fewer than 2 clips (still settling, or the Create did not land):');
+    for (const w of short) console.error('   ' + w);
     failed++;
-  } else {
-    log('✓ every submitted title has exactly 2 clips — no double submits');
   }
+  if (over.length) {
+    const expected = !!ONLY;   // a re-submit legitimately stacks on top of the earlier take pair
+    console.error(`${expected ? 'ℹ' : '⚠'} these titles have more than 2 clips${expected
+      ? ' — expected for an --only re-submit, Suno adds alongside the existing takes:'
+      : ' — that is a double submit:'}`);
+    for (const w of over) console.error('   ' + w);
+    if (!expected) failed++;
+  }
+  if (!short.length && !over.length) log('✓ every submitted title has exactly 2 clips — no double submits');
 }
 
 // ---------------------------------------------------------------- doctor & diagnostics
