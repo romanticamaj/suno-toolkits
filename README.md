@@ -63,7 +63,7 @@ Input is a `prompts.json` (or a folder of them). Schema and full workflow detail
 
 ## How it works
 
-Suno has no public API; everything here calls its internal `studio-api` from a logged-in browser tab (auth via the page's Clerk token, which never leaves the browser — `lib/session.mjs` runs each call inside the page). API calls are concurrency-capped with `429` backoff.
+Suno has no public API; everything here calls its internal `studio-api` from a logged-in browser tab (auth via the page's Clerk token, which never leaves the browser — `lib/session.mjs` at the repo root — shared by both skills — runs each call inside the page). API calls are concurrency-capped with `429` backoff.
 
 Lossless audio is not sitting on a CDN: Suno renders the WAV on demand and hands back a short-lived signed S3 URL. The public `media_urls` are an encrypted opus stream for the web player. Since Suno's September 2026 download caps, `download.mjs` resolves WAVs through the **Suno Studio download endpoint** — the route Suno documents as unlimited for Premier + Studio, measured not to touch the account's `download_usage` — and falls back to the legacy `convert_wav` + `wav_file/` pair for accounts without Studio (with an allowance guard). The full investigation is in [`docs/2026-09-suno-download-limits.md`](docs/2026-09-suno-download-limits.md). Each WAV is streamed straight to disk and verified by size against the clip's duration and by the clip id Suno embeds in the file.
 

@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.3.0
+version: 2.4.0
 ---
 
 # Suno Download
@@ -46,10 +46,16 @@ nothing. Skip this when the workspace was just created by `/suno-submit` in this
 
 Conversion + download of a full workspace takes minutes (first-run WAV conversion is server-side
 and not instant; 112 clips took ~3–4 min just to convert). **Always `run_in_background: true`.**
+You will be notified when it exits.
 
 ```bash
 node "<skill>/scripts/download.mjs" "<workspace>" --out "<dir>"      # + --only … if used
 ```
+
+**Do not poll it** — checking progress every few seconds spends the turns this script exists to
+save; the notification is the signal. Do not start a second run while one is in flight either:
+both would open the same Chrome profile and the second is refused (the profile is file-locked).
+`/suno-submit` shares that profile, so the same applies across the two skills.
 
 The script **waits for rendering clips** (up to 20 min, `--wait-timeout <min>` to change,
 `--no-wait` to download only what is complete). Launching it right after `/suno-submit` is fine.
@@ -139,4 +145,5 @@ duration, ok, size | error, skippedByTripwire? }] }`.
 
 - `references/path-b.md` — the model-driven Claude-in-Chrome procedure and its JS blocks
   (workspace/clip listing, convert+poll, URL-map export, sidecar bundle). Fallback only.
-- `../suno-submit/scripts/lib/session.mjs` — the shared profile / login / `api()` helper.
+- `<repo>/lib/session.mjs` — the shared Chrome profile / login / `api()` helper, used by both
+  skills (so one `--login` serves `/suno-submit` too).
