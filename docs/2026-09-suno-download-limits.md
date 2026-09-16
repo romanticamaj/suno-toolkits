@@ -145,6 +145,29 @@ On 2026-09-04 the same legacy route had served 42 WAVs without moving the counte
 Consequences: the Studio route is the only uncounted one; `--legacy-wav` is a counted fallback and
 the allowance guard on it is real. The two legacy test downloads cost 2 of the period's 60.
 
+### What `additional_download_remaining` is — investigated 2026-09-16, still unresolved
+
+The field sits alongside the period counters and reads **7** on this Premier account. Three things
+are now established:
+
+- It is **not the bucket being drawn down**: it stayed at 7 while
+  `current_period_downloads_used` went 0 -> 2 -> 3.
+- It is **not purchased top-ups**: `current_period_download_top_ups_purchased` is 0.
+- **No loaded frontend chunk references it.** Scans of every `/_next/static/` script on both
+  `/create` (113 files) and `/me` (114) found zero hits for the field or for any
+  `download...remaining/left/limit` identifier, so the number is never shown to the user.
+
+Nothing in `plan.features`, `plan.usage_plan_features`, `promotions` or `day0_boost` explains it,
+and `/api/usage_plan_descriptions` (plus two spelling variants) 404. The value happens to equal the
+free tier's 7 lifetime trial downloads, which makes "leftover trial grant, possibly usable as
+overflow once the period limit is exhausted" the leading guess — but confirming it means burning
+all 60, so it stays a guess.
+
+**Consequence for the guard:** `download.mjs` deliberately excludes it from the remaining-allowance
+arithmetic. Counting it would let 7 too many through if it turns out not to apply; excluding it
+only makes the guard ask for `--force` slightly early. The number is still printed, labelled as
+uncounted.
+
 ### Decision for `download.mjs` (v0.7.0)
 
 1. Replace `convert_wav` + `wav_file/` with `GET /api/studio/clip/{id}/download?format=wav`

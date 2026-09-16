@@ -167,7 +167,7 @@ async function run() {
   if (usageBefore) {
     const u = usageBefore;
     log(`Downloads : ${u.current_period_downloads_used}/${u.current_period_downloads_limit} used this period` +
-        (u.additional_download_remaining ? ` (+${u.additional_download_remaining} extra)` : ''));
+        (u.additional_download_remaining ? ` · +${u.additional_download_remaining} in a separate "additional" bucket, semantics unconfirmed, not counted by the guard` : ''));
   }
   log(`WAV route : ${wavPath_ === 'studio' ? 'Studio download endpoint (uncounted for Premier+Studio)' : 'legacy convert_wav + wav_file/'}`);
   if (!LEGACY_WAV && !hasStudio) console.error('  ⚠ this account has no Studio access — falling back to the legacy WAV route');
@@ -234,7 +234,14 @@ async function run() {
   // downloads_used 0→2); a batch larger than the remaining allowance is refused there unless
   // --force. The Studio route is documented unlimited and measured uncounted, so it only informs.
   if (usageBefore && wavPath_ === 'legacy') {
-    const remaining = (usageBefore.current_period_downloads_limit - usageBefore.current_period_downloads_used) + (usageBefore.additional_download_remaining || 0);
+    // Deliberately NOT adding `additional_download_remaining` here. Investigated 2026-09-16: it
+    // sat at 7 while `current_period_downloads_used` went 0 → 2 → 3, so it is not the bucket being
+    // drawn down; `current_period_download_top_ups_purchased` was 0, so it is not purchased
+    // top-ups either; and no loaded frontend chunk references the field at all. Whether those 7
+    // become usable once the period limit is exhausted is unknown without exhausting it. Counting
+    // them would let 7 too many through if the answer is no; leaving them out only makes the guard
+    // ask for --force slightly early. Fail safe.
+    const remaining = usageBefore.current_period_downloads_limit - usageBefore.current_period_downloads_used;
     if (todo.length > remaining && !FORCE) {
       throw new Error(`${todo.length} clips to download but only ${remaining} download(s) left this period on the legacy route — use the Studio route, --only to pick takes, or --force`);
     }

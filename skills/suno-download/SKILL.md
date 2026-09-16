@@ -1,7 +1,7 @@
 ---
 name: suno-download
 description: Download a Suno workspace as lossless WAV + full-metadata sidecar JSON by running scripts/download.mjs. Use when the user wants to download Suno songs, export a workspace, fetch WAV files, grab generated tracks, or invokes "/suno-download". Do NOT drive the browser turn by turn - launch the script, which resolves the workspace, waits for rendering clips, converts, downloads with size verification, writes sidecars and _download_result.json in one process. Shares the persistent Chrome profile (and one-time --login) with suno-submit. A model-driven Claude in Chrome loop remains as the documented fallback in references/path-b.md.
-version: 2.2.0
+version: 2.3.0
 ---
 
 # Suno Download
