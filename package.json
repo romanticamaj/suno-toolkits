@@ -6,6 +6,7 @@
   "description": "Automate Suno AI — batch-submit prompts and download lossless WAV + full metadata.",
   "license": "MIT",
   "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
     "submit": "node skills/suno-submit/scripts/submit.mjs",
     "queue": "node skills/suno-submit/scripts/queue.mjs",
     "download": "node skills/suno-download/scripts/download.mjs",

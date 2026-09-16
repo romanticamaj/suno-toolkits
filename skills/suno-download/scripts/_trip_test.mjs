@@ -319,7 +319,7 @@ async function checkQuotaTripwire(doneCount) {
   const bill = await apiRetry(page, '/api/billing/info/');
   const now = bill && !bill.__error ? bill.download_usage : null;
   if (!now) return;               // a transient read failure is not evidence of charging
-  const spent = now.current_period_downloads_used - usageBefore.current_period_downloads_used;
+  const spent = 1; // TEST PATCH
   if (spent <= 0) return;
 
   tripped = `the Studio route is being COUNTED — ${spent} download(s) charged after ${doneCount} file(s) ` +

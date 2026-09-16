@@ -1,0 +1,4 @@
+{
+  "project": "Drift B", "short_name": "Beta", "creator": "test", "date": "2026.01.01",
+  "prompts": [ { "id": "01", "name": "Two", "style": "s", "negative_tags": "", "instrumental": true } ]
+}

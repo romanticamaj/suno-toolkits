@@ -1,0 +1,34 @@
+{
+  "project": "Fixture Episode — BGM_02 Chase",
+  "short_name": "Fable",
+  "creator": "test",
+  "date": "2026.01.01",
+  "audio_reference": "DocLevelRef",
+  "prompts": [
+    {
+      "id": "01",
+      "name": "HornDrive",
+      "name_zh": "銅管推進",
+      "style": "neo soul, horn stabs",
+      "lyrics": "[Intro]",
+      "negative_tags": "",
+      "instrumental": true,
+      "model": "v5",
+      "weirdness": null,
+      "style_influence": null
+    },
+    {
+      "id": "03",
+      "name": "TenseStrings",
+      "name_zh": "緊張弦樂",
+      "style": "neo-classical, string ostinato",
+      "lyrics": "[Build]",
+      "negative_tags": "NO hard drums",
+      "instrumental": false,
+      "model": null,
+      "vocal_gender": "female",
+      "audio_reference": "PromptLevelRef",
+      "title": "ExplicitTitleWins"
+    }
+  ]
+}

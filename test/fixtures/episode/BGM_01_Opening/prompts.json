@@ -1,0 +1,32 @@
+{
+  "project": "Fixture Episode — BGM_01 Opening",
+  "short_name": "Fable",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    {
+      "id": "01",
+      "name": "WarmNylon",
+      "name_zh": "溫暖尼龍弦",
+      "style": "neo-classical, nylon guitar",
+      "lyrics": "[Intro]\n[Soft]",
+      "negative_tags": "NO vocals, NO drums",
+      "instrumental": true,
+      "model": null,
+      "weirdness": null,
+      "style_influence": null
+    },
+    {
+      "id": "02",
+      "name": "FeltPiano",
+      "name_zh": "絨氈鋼琴",
+      "style": "neo-classical, felt piano",
+      "lyrics": null,
+      "negative_tags": "no brass,  NO   synth lead , ",
+      "instrumental": true,
+      "model": "v6",
+      "weirdness": 20,
+      "style_influence": 80
+    }
+  ]
+}

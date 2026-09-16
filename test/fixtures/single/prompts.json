@@ -1,0 +1,10 @@
+{
+  "project": "Fixture Single (no BGM folder)",
+  "short_name": "Solo",
+  "creator": "test",
+  "date": "2026.01.01",
+  "prompts": [
+    { "id": "01", "name": "OnlyTrack", "style": "ambient", "lyrics": null,
+      "negative_tags": "NO vocals", "instrumental": true, "model": "v3.5" }
+  ]
+}

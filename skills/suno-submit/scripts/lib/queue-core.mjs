@@ -43,6 +43,10 @@ export function buildQueue(input) {
       queue.push({
         i: queue.length + 1,
         file, group, id: pr.id, name: pr.name, title,
+        // Carried so the drift check reads the declared short_name instead of re-parsing `title`:
+        // an explicit per-prompt `title` legitimately ignores short_name, and parsing it back out
+        // reported that deliberate override as a short_name inconsistency.
+        short: doc.short_name,
         style: pr.style || '',
         // Suno's Exclude field wants bare tags — "NO vocals, NO drums" → "vocals, drums"
         exclude: (pr.negative_tags || '').split(',').map(s => s.trim().replace(/^no\s+/i, '')).filter(Boolean).join(', '),
@@ -97,9 +101,9 @@ export function applyOnly(queue, only) {
   return picked.sort((a, b) => a.i - b.i);
 }
 
-/** Distinct short_name prefixes in a queue — more than one means titles will be inconsistent. */
+/** Distinct short_name values in a queue — more than one means titles will be inconsistent. */
 export function shortNames(queue) {
-  return [...new Set(queue.map(q => q.title.split('_')[0]))];
+  return [...new Set(queue.map(q => q.short).filter(Boolean))];
 }
 
 /** First non-null model across the queue, mapped to the create form's dropdown label. */
